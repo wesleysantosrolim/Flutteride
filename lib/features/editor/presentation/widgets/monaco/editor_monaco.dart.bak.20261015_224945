@@ -1,0 +1,284 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_monaco/flutter_monaco.dart';
+
+import 'package:flutteride/features/editor/services/editor_monaco_sync_service.dart';
+
+class EditorMonaco extends StatefulWidget {
+  final String? filePath;
+  final String fileContent;
+  final bool visible;
+  final ValueChanged<String>? onContentChanged;
+  final ValueChanged<MonacoController>? onControllerReady;
+  final EditorMonacoSyncService? syncService;
+
+  const EditorMonaco({
+    super.key,
+    required this.filePath,
+    required this.fileContent,
+    required this.visible,
+    this.onContentChanged,
+    this.onControllerReady,
+    this.syncService,
+  });
+
+  @override
+  State<EditorMonaco> createState() => _EditorMonacoState();
+}
+
+class _EditorMonacoState extends State<EditorMonaco> {
+  MonacoController? _controller;
+
+  bool _ready = false;
+
+  bool _isSyncingContent = false;
+
+  Future<void> _handleReady(
+    MonacoController controller,
+  ) async {
+    _controller = controller;
+    _ready = true;
+
+    widget.syncService?.attachMonacoController(
+      controller,
+    );
+
+    widget.onControllerReady?.call(
+      controller,
+    );
+
+    /*
+     * O Monaco pode ter sido criado com initialText
+     * vazio antes de o arquivo terminar de ser lido.
+     *
+     * Portanto, quando o controller ficar pronto,
+     * sincronizamos explicitamente o conteúdo atual
+     * recebido pelo widget.
+     */
+    await _syncCurrentContent();
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {});
+  }
+
+  Future<void> _syncCurrentContent() async {
+    final controller = _controller;
+
+    if (controller == null || !_ready) {
+      return;
+    }
+
+    if (_isSyncingContent) {
+      return;
+    }
+
+    final content = widget.fileContent;
+    final filePath = widget.filePath;
+
+    if (filePath == null) {
+      return;
+    }
+
+    _isSyncingContent = true;
+
+    try {
+      await controller.whenReady;
+
+      if (!mounted) {
+        return;
+      }
+
+      /*
+       * Confirma novamente que o arquivo e o conteúdo
+       * continuam sendo os mesmos depois do await.
+       *
+       * Isso evita que uma leitura antiga sobrescreva
+       * um arquivo que o usuário já selecionou.
+       */
+      if (widget.filePath != filePath ||
+          widget.fileContent != content) {
+        return;
+      }
+
+      final currentContent =
+          await controller.document.getText();
+
+      if (!mounted) {
+        return;
+      }
+
+      if (currentContent != content) {
+        await controller.document.setText(
+          content,
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      final language =
+          _languageForFile(filePath);
+
+      await controller.document.setLanguage(
+        language,
+      );
+    } catch (error) {
+      debugPrint(
+        '[EditorMonaco] Erro ao sincronizar conteúdo: $error',
+      );
+    } finally {
+      _isSyncingContent = false;
+    }
+  }
+
+  @override
+  void didUpdateWidget(
+    covariant EditorMonaco oldWidget,
+  ) {
+    super.didUpdateWidget(oldWidget);
+
+    final fileChanged =
+        oldWidget.filePath != widget.filePath;
+
+    final contentChanged =
+        oldWidget.fileContent !=
+            widget.fileContent;
+
+    if (fileChanged || contentChanged) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+
+        _syncCurrentContent();
+      });
+    }
+  }
+
+  MonacoLanguage _languageForFile(
+    String path,
+  ) {
+    final lower = path.toLowerCase();
+
+    if (lower.endsWith('.dart')) {
+      return MonacoLanguage.dart;
+    }
+
+    if (lower.endsWith('.json')) {
+      return MonacoLanguage.json;
+    }
+
+    if (lower.endsWith('.yaml') ||
+        lower.endsWith('.yml')) {
+      return MonacoLanguage.yaml;
+    }
+
+    if (lower.endsWith('.md')) {
+      return MonacoLanguage.markdown;
+    }
+
+    if (lower.endsWith('.xml')) {
+      return MonacoLanguage.xml;
+    }
+
+    if (lower.endsWith('.html')) {
+      return MonacoLanguage.html;
+    }
+
+    if (lower.endsWith('.css')) {
+      return MonacoLanguage.css;
+    }
+
+    if (lower.endsWith('.js')) {
+      return MonacoLanguage.javascript;
+    }
+
+    if (lower.endsWith('.ts')) {
+      return MonacoLanguage.typescript;
+    }
+
+    return MonacoLanguage.plaintext;
+  }
+
+  @override
+  Widget build(
+    BuildContext context,
+  ) {
+    final theme = Theme.of(context);
+
+    final isDark =
+        theme.brightness == Brightness.dark;
+
+    final background = isDark
+        ? const Color(0xFF1E1E1E)
+        : Colors.white;
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        MonacoEditor(
+          initialText: widget.fileContent,
+          backgroundColor: background,
+          options: EditorOptions(
+            language: widget.filePath != null
+                ? _languageForFile(
+                    widget.filePath!,
+                  )
+                : MonacoLanguage.dart,
+            theme: isDark
+                ? MonacoTheme.vsDark
+                : MonacoTheme.vs,
+            fontSize: 14,
+            wordWrap: MonacoWordWrap.off,
+            minimap: const MonacoMinimapOptions(
+              enabled: false,
+			  
+            ),
+            tabSize: 2,
+            insertSpaces: true,
+			
+			quickSuggestions: true,
+            suggestOnTriggerCharacters: true,
+          ),
+          onReady: _handleReady,
+          onContentChanged:
+              widget.onContentChanged,
+          loadingBuilder: (context) {
+            return Container(
+              color: background,
+            );
+          },
+          errorBuilder: (
+            context,
+            error,
+            stackTrace,
+          ) {
+            return Container(
+              color: background,
+              alignment: Alignment.center,
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                'Erro ao carregar o Monaco:\n$error',
+                textAlign: TextAlign.center,
+              ),
+            );
+          },
+        ),
+        if (!widget.visible || !_ready)
+          Container(
+            color: background,
+            alignment: Alignment.center,
+            child: !_ready
+                ? const SizedBox.shrink()
+                : const Text(
+                    'Selecione um arquivo para começar',
+                  ),
+          ),
+      ],
+    );
+  }
+}

@@ -1,0 +1,718 @@
+// Semantic tests for the real editor bridge (assets/monaco/bridge/*.js).
+// Run: node --test tool/bridge_tests/
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+import { bootEditorPage, dispatch, eventsNamed } from './harness.mjs';
+
+function editOnce(model, text = 'x') {
+  model.applyEdits([
+    {
+      range: {
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: 1,
+        endColumn: 1,
+      },
+      text,
+    },
+  ]);
+}
+
+test('first edit after docs.open reports dirty', async () => {
+  const page = bootEditorPage();
+  const opened = await dispatch(page, 'docs.open', {
+    text: 'hello',
+    language: 'plaintext',
+    uri: 'file:///a.txt',
+  });
+  assert.equal(opened.ok, true);
+
+  editOnce(page.models.get('file:///a.txt'));
+
+  const dirty = await dispatch(page, 'document.isDirty', {
+    uri: 'file:///a.txt',
+  });
+  assert.equal(dirty.ok, true);
+  assert.equal(dirty.value, true, 'the FIRST edit must already read dirty');
+});
+
+test('first edit of the boot document reports dirty', async () => {
+  const page = bootEditorPage();
+  editOnce(page.bootModel);
+
+  const dirty = await dispatch(page, 'document.isDirty', { uri: null });
+  assert.equal(dirty.ok, true);
+  assert.equal(dirty.value, true);
+});
+
+test('setText re-baselines: a programmatic load is clean', async () => {
+  const page = bootEditorPage();
+  editOnce(page.bootModel);
+  await dispatch(page, 'document.setText', { uri: null, text: 'fresh' });
+
+  const dirty = await dispatch(page, 'document.isDirty', { uri: null });
+  assert.equal(dirty.value, false);
+});
+
+test('markSaved re-baselines the edited document', async () => {
+  const page = bootEditorPage();
+  editOnce(page.bootModel);
+  await dispatch(page, 'document.markSaved', { uri: null });
+
+  const dirty = await dispatch(page, 'document.isDirty', { uri: null });
+  assert.equal(dirty.value, false);
+});
+
+test('close and reopen the same URI starts clean, then dirties on edit', async () => {
+  const page = bootEditorPage();
+  await dispatch(page, 'docs.open', { text: 'v1', uri: 'file:///b.txt' });
+  editOnce(page.models.get('file:///b.txt'));
+  await dispatch(page, 'docs.close', { uri: 'file:///b.txt' });
+
+  await dispatch(page, 'docs.open', { text: 'v2', uri: 'file:///b.txt' });
+  const clean = await dispatch(page, 'document.isDirty', {
+    uri: 'file:///b.txt',
+  });
+  assert.equal(clean.value, false, 'a reopened URI must not inherit state');
+
+  editOnce(page.models.get('file:///b.txt'));
+  const dirty = await dispatch(page, 'document.isDirty', {
+    uri: 'file:///b.txt',
+  });
+  assert.equal(dirty.value, true);
+});
+
+test('edits to an INACTIVE document emit contentChanged with its uri', async () => {
+  const page = bootEditorPage();
+  await dispatch(page, 'docs.open', { text: '', uri: 'file:///bg.txt' });
+  // The boot model stays active; edit the background document.
+  editOnce(page.models.get('file:///bg.txt'), 'background');
+
+  const events = eventsNamed(page, 'contentChanged');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].data.uri, 'file:///bg.txt');
+  assert.equal(events[0].data.isFlush, false);
+});
+
+test('active document edits emit contentChanged with the model uri', async () => {
+  const page = bootEditorPage();
+  editOnce(page.bootModel, 'typed');
+
+  const events = eventsNamed(page, 'contentChanged');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].data.uri, page.bootModel.uri.toString());
+});
+
+test('closed documents stop emitting contentChanged', async () => {
+  const page = bootEditorPage();
+  await dispatch(page, 'docs.open', { text: '', uri: 'file:///c.txt' });
+  const model = page.models.get('file:///c.txt');
+  await dispatch(page, 'docs.close', { uri: 'file:///c.txt' });
+
+  editOnce(model);
+  assert.equal(eventsNamed(page, 'contentChanged').length, 0);
+});
+
+test('oversized inserted text ships truncated without deltas', async () => {
+  const page = bootEditorPage();
+  editOnce(page.bootModel, 'x'.repeat(70000));
+
+  const [event] = eventsNamed(page, 'contentChanged');
+  assert.equal(event.data.truncated, true);
+  assert.equal(event.data.changes, undefined);
+});
+
+test('events with more than 1000 changes ship truncated', async () => {
+  const page = bootEditorPage();
+  page.bootModel.applyEdits(
+    Array.from({ length: 1001 }, () => ({
+      range: {
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: 1,
+        endColumn: 1,
+      },
+      text: 'y',
+    })),
+  );
+
+  const [event] = eventsNamed(page, 'contentChanged');
+  assert.equal(event.data.truncated, true);
+  assert.equal(event.data.changes, undefined);
+});
+
+test('executeAction awaits an asynchronous action run()', async () => {
+  const page = bootEditorPage();
+  let resolved = false;
+  page.sandbox.__testActions = {
+    'my.async': {
+      run: () =>
+        new Promise((resolve) =>
+          setTimeout(() => {
+            resolved = true;
+            resolve();
+          }, 25),
+        ),
+    },
+  };
+
+  const response = await dispatch(page, 'editor.executeAction', {
+    actionId: 'my.async',
+    args: null,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(
+    resolved,
+    true,
+    'the response must not be posted before the action promise settles',
+  );
+});
+
+test('strict getLines rejects out-of-range lines', async () => {
+  const page = bootEditorPage();
+  const response = await dispatch(page, 'document.getLines', {
+    uri: null,
+    startLine: 99,
+    endLine: 99,
+    strict: true,
+  });
+  assert.equal(response.ok, false, 'out-of-range strict read must fail');
+});
+
+test('non-strict getLines keeps clamping (documented behavior)', async () => {
+  const page = bootEditorPage();
+  const response = await dispatch(page, 'document.getLines', {
+    uri: null,
+    startLine: 99,
+    endLine: 99,
+  });
+  assert.equal(response.ok, true);
+  assert.deepEqual(response.value, ['boot text']);
+});
+
+test('an intentionally empty completion insertText is preserved', async () => {
+  const page = bootEditorPage();
+  await dispatch(page, 'completions.register', {
+    id: 'p1',
+    languages: ['plaintext'],
+  });
+
+  const { provider } = page.sandbox.__completionProviders[0];
+  const resultPromise = provider.provideCompletionItems(
+    page.bootModel,
+    new page.sandbox.monaco.Position(1, 1),
+    { triggerKind: 0 },
+    { onCancellationRequested: () => {} },
+  );
+
+  // Answer the JS->Dart completion request like the Dart side would.
+  const deadline = Date.now() + 2000;
+  let request;
+  while (!request && Date.now() < deadline) {
+    request = page.messages.find((m) => m.kind === 'request');
+    if (!request) await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  page.sandbox.FlutterMonaco.respond({
+    id: request.id,
+    ok: true,
+    value: {
+      suggestions: [{ label: 'wrap-selection', insertText: '' }],
+    },
+  });
+
+  const result = await resultPromise;
+  assert.equal(result.suggestions.length, 1);
+  assert.equal(
+    result.suggestions[0].insertText,
+    '',
+    'an empty insertText must not fall back to the label',
+  );
+});
+
+test('diff.getState reports an uncomputed diff as null, not zero', async () => {
+  const page = bootEditorPage();
+  const diffCtx = {};
+  page.sandbox.__FMB.diffApi(diffCtx);
+  const textModel = page.sandbox.monaco.editor.createModel('t', 'plaintext');
+  diffCtx.diffState.editor = {
+    getModel: () => ({ original: textModel, modified: textModel }),
+    getLineChanges: () => null,
+    waitForDiff: () => new Promise(() => {}),
+  };
+
+  const response = await dispatch(page, 'diff.getState', {});
+  assert.equal(response.ok, true);
+  assert.equal(
+    response.value.lineChangeCount,
+    null,
+    'an uncomputed diff must be distinguishable from zero changes',
+  );
+});
+
+// ---- programmatic edits and the undo stack ----
+
+const range = (startLineNumber, startColumn, endLineNumber, endColumn) => ({
+  startLineNumber,
+  startColumn,
+  endLineNumber,
+  endColumn,
+});
+
+test('document.applyEdits is one undoable step after user typing', async () => {
+  const page = bootEditorPage();
+  const model = page.bootModel;
+  model.setValue('hello');
+  // Typing rides pushEditOperations and leaves its undo element open.
+  model.pushEditOperations(
+    [],
+    [{ range: range(1, 6, 1, 6), text: ' abc' }],
+    () => null,
+  );
+
+  const response = await dispatch(page, 'document.applyEdits', {
+    uri: null,
+    edits: [{ range: range(1, 1, 1, 1), text: 'XYZ-' }],
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.value, true, 'the return contract stays true');
+  assert.equal(model.getValue(), 'XYZ-hello abc');
+
+  model.undo();
+  assert.equal(
+    model.getValue(),
+    'hello abc',
+    'undo must revert exactly the programmatic edit',
+  );
+  model.undo();
+  assert.equal(model.getValue(), 'hello');
+  model.redo();
+  model.redo();
+  assert.equal(model.getValue(), 'XYZ-hello abc');
+});
+
+test('replaceMatches with no match adds no undo step', async () => {
+  const page = bootEditorPage();
+  const model = page.bootModel;
+  model.setValue('hello');
+  model.pushEditOperations(
+    [],
+    [{ range: range(1, 6, 1, 6), text: ' abc' }],
+    () => null,
+  );
+
+  const response = await dispatch(page, 'document.replaceMatches', {
+    uri: null,
+    query: 'zzz',
+    replacement: 'q',
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.value, 0);
+
+  model.undo();
+  assert.equal(
+    model.getValue(),
+    'hello',
+    'the next undo must revert the user typing, not an empty step',
+  );
+});
+
+test('document.applyEdits on an inactive pinned document is undoable', async () => {
+  const page = bootEditorPage();
+  await dispatch(page, 'docs.open', { text: 'abc', uri: 'file:///p.txt' });
+  const model = page.models.get('file:///p.txt');
+
+  await dispatch(page, 'document.applyEdits', {
+    uri: 'file:///p.txt',
+    edits: [{ range: range(1, 4, 1, 4), text: 'd' }],
+  });
+  assert.equal(model.getValue(), 'abcd');
+  model.undo();
+  assert.equal(model.getValue(), 'abc');
+});
+
+test('programmatic edits keep the auto-indent on the cursor line', async () => {
+  const page = bootEditorPage();
+  const model = page.bootModel;
+  // The user pressed Enter in an indented block: line 2 holds only
+  // auto-inserted indentation and carries the cursor.
+  model.setValue('    let a = 1;\n    ');
+  model._trimAutoWhitespaceLines = [2];
+  page.sandbox.__selections = [range(2, 5, 2, 5)];
+
+  await dispatch(page, 'document.applyEdits', {
+    uri: null,
+    edits: [{ range: range(1, 1, 1, 1), text: '// x\n' }],
+  });
+  assert.equal(
+    model.getValue(),
+    '// x\n    let a = 1;\n    ',
+    'an edit elsewhere must not strip the cursor line indentation',
+  );
+});
+
+test('replaceMatches keeps the auto-indent on the cursor line', async () => {
+  const page = bootEditorPage();
+  const model = page.bootModel;
+  model.setValue('    let a = 1;\n    ');
+  model._trimAutoWhitespaceLines = [2];
+  page.sandbox.__selections = [range(2, 5, 2, 5)];
+
+  await dispatch(page, 'document.replaceMatches', {
+    uri: null,
+    query: 'let',
+    replacement: 'var',
+    isRegex: false,
+    matchCase: true,
+    wholeWord: false,
+  });
+  assert.equal(model.getValue(), '    var a = 1;\n    ');
+});
+
+// ---- executeAction ----
+
+/** Collects unhandled rejections raised while [body] runs. */
+async function collectUnhandledRejections(body) {
+  const seen = [];
+  const listener = (reason) => seen.push(reason);
+  process.on('unhandledRejection', listener);
+  try {
+    await body();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } finally {
+    process.off('unhandledRejection', listener);
+  }
+  return seen;
+}
+
+test('executeAction rejects an unknown id instead of reporting success', async () => {
+  const page = bootEditorPage();
+  let response;
+  const rejections = await collectUnhandledRejections(async () => {
+    response = await dispatch(page, 'editor.executeAction', {
+      actionId: 'no.such.command',
+      args: null,
+    });
+  });
+  assert.equal(response.ok, false, 'an unknown id must fail');
+  assert.match(response.error.message, /no\.such\.command/);
+  assert.deepEqual(
+    rejections.map(String),
+    [],
+    'the command-service rejection must not leak as unhandled',
+  );
+});
+
+test('executeAction reports a missing model instead of success', async () => {
+  const page = bootEditorPage();
+  page.editor.setModel(null);
+  const response = await dispatch(page, 'editor.executeAction', {
+    actionId: 'no.such.command',
+    args: null,
+  });
+  assert.equal(response.ok, false, 'nothing ran, so this must not succeed');
+  assert.match(response.error.message, /no active model/);
+});
+
+test('executeAction awaits a registered command and surfaces its failure', async () => {
+  const page = bootEditorPage();
+  let ranWith;
+  page.sandbox.__testCommands = {
+    'my.command': (args) => {
+      ranWith = args;
+    },
+    'my.failing': () => {
+      throw new Error('boom from command');
+    },
+  };
+
+  const ok = await dispatch(page, 'editor.executeAction', {
+    actionId: 'my.command',
+    args: { n: 1 },
+  });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.value, true);
+  assert.deepEqual(ranWith, { n: 1 });
+
+  const failed = await dispatch(page, 'editor.executeAction', {
+    actionId: 'my.failing',
+    args: null,
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error.message, 'boom from command');
+});
+
+test('executeAction keeps editor commands and trigger handlers working', async () => {
+  const page = bootEditorPage();
+  const service = page.editor._commandService;
+  const executeCommand = service.executeCommand;
+  for (const actionId of ['undo', 'cursorDown', 'type']) {
+    const response = await dispatch(page, 'editor.executeAction', {
+      actionId,
+      args: actionId === 'type' ? { text: 'x' } : null,
+    });
+    assert.equal(response.ok, true, actionId);
+    assert.equal(response.value, true, actionId);
+  }
+  assert.deepEqual(page.sandbox.__triggered, ['undo', 'cursorDown', 'type']);
+  assert.equal(
+    service.executeCommand,
+    executeCommand,
+    'the command service must be left exactly as it was',
+  );
+});
+
+test('executeAction restores a prototype executeCommand (real Monaco layout)', async () => {
+  const page = bootEditorPage();
+  // In Monaco 0.57 executeCommand lives on StandaloneCommandService's
+  // prototype, not on the instance.
+  const proto = {
+    executeCommand(id) {
+      return id === 'proto.command'
+        ? Promise.resolve('ran')
+        : Promise.reject(new Error(`command '${id}' not found`));
+    },
+  };
+  const service = Object.create(proto);
+  page.editor._commandService = service;
+
+  const ok = await dispatch(page, 'editor.executeAction', {
+    actionId: 'proto.command',
+    args: null,
+  });
+  assert.equal(ok.ok, true);
+  const unknown = await dispatch(page, 'editor.executeAction', {
+    actionId: 'nope',
+    args: null,
+  });
+  assert.equal(unknown.ok, false);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(service, 'executeCommand'),
+    false,
+    'the temporary own wrapper must be removed again',
+  );
+  assert.equal(service.executeCommand, proto.executeCommand);
+});
+
+test('executeAction settles on the outer command, not a nested same-id call', async () => {
+  const page = bootEditorPage();
+  let depth = 0;
+  page.sandbox.__testCommands = {
+    'my.reentrant': () => {
+      depth += 1;
+      if (depth === 1) {
+        // A nested dispatch of the same id fails; the outer one succeeds.
+        page.editor._commandService
+          .executeCommand('my.reentrant')
+          .catch(() => {});
+        return 'outer';
+      }
+      throw new Error('nested failure');
+    },
+  };
+  const response = await dispatch(page, 'editor.executeAction', {
+    actionId: 'my.reentrant',
+    args: null,
+  });
+  assert.equal(response.ok, true, response.error && response.error.message);
+});
+
+// ---- find / replace ----
+
+function matchesOf(response) {
+  assert.equal(response.ok, true, response.error && response.error.message);
+  return response.value.map(
+    (m) => `${m.match}@${m.range.startLineNumber}:${m.range.startColumn}`,
+  );
+}
+
+test('whole-word search uses Monaco word separators for symbol queries', async () => {
+  const page = bootEditorPage();
+  page.bootModel.setValue('let $x = 1; $xy; @foo bar @food\nfoo foobar');
+  const find = (query) =>
+    dispatch(page, 'document.findMatches', {
+      uri: null,
+      query,
+      isRegex: false,
+      matchCase: true,
+      wholeWord: true,
+      limit: 1000,
+    });
+
+  assert.deepEqual(matchesOf(await find('$x')), ['$x@1:5']);
+  assert.deepEqual(matchesOf(await find('@foo')), ['@foo@1:18']);
+  assert.deepEqual(matchesOf(await find('foo')), ['foo@1:19', 'foo@2:1']);
+
+  const call = page.sandbox.__findCalls.at(-1);
+  assert.equal(call.searchString, 'foo', 'the query must reach Monaco unescaped');
+  assert.equal(call.isRegex, false);
+  assert.equal(typeof call.wordSeparators, 'string');
+});
+
+test('whole-word search applies to regex queries too', async () => {
+  const page = bootEditorPage();
+  page.bootModel.setValue('foo foobar fooo');
+  const response = await dispatch(page, 'document.findMatches', {
+    uri: null,
+    query: 'fo+',
+    isRegex: true,
+    matchCase: true,
+    wholeWord: true,
+    limit: 1000,
+  });
+  assert.deepEqual(matchesOf(response), ['foo@1:1', 'fooo@1:12']);
+});
+
+test('whole-word search follows the editor wordSeparators option', async () => {
+  const page = bootEditorPage();
+  page.sandbox.__wordSeparators = '-';
+  page.bootModel.setValue('a-b a.b');
+  const response = await dispatch(page, 'document.findMatches', {
+    uri: null,
+    query: 'b',
+    isRegex: false,
+    matchCase: true,
+    wholeWord: true,
+    limit: 1000,
+  });
+  assert.deepEqual(matchesOf(response), ['b@1:3']);
+  assert.equal(page.sandbox.__findCalls.at(-1).wordSeparators, '-');
+});
+
+test('whole-word replaceMatches replaces symbol-delimited words', async () => {
+  const page = bootEditorPage();
+  page.bootModel.setValue('let $x = $xy + $x;');
+  const response = await dispatch(page, 'document.replaceMatches', {
+    uri: null,
+    query: '$x',
+    replacement: '$y',
+    isRegex: false,
+    matchCase: true,
+    wholeWord: true,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.value, 2);
+  assert.equal(page.bootModel.getValue(), 'let $y = $xy + $y;');
+});
+
+test('the legacy findMatches helper honors whole word like the command', () => {
+  const page = bootEditorPage();
+  page.bootModel.setValue('let $x = $xy;');
+  const matches = page.sandbox.flutterMonaco.findMatches('$x', {
+    wholeWord: true,
+    matchCase: true,
+  });
+  assert.deepEqual(
+    matches.map((m) => m.match),
+    ['$x'],
+  );
+});
+
+test('replaceMatches replaces every match, beyond 9999', async () => {
+  const page = bootEditorPage();
+  page.bootModel.setValue('a '.repeat(12000));
+  const response = await dispatch(page, 'document.replaceMatches', {
+    uri: null,
+    query: 'a',
+    replacement: 'b',
+    isRegex: false,
+    matchCase: true,
+    wholeWord: false,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.value, 12000);
+  assert.equal(page.bootModel.getValue(), 'b '.repeat(12000));
+});
+
+test('findMatches still honors an explicit limit', async () => {
+  const page = bootEditorPage();
+  page.bootModel.setValue('a '.repeat(50));
+  const response = await dispatch(page, 'document.findMatches', {
+    uri: null,
+    query: 'a',
+    isRegex: false,
+    matchCase: true,
+    wholeWord: false,
+    limit: 5,
+  });
+  assert.equal(response.value.length, 5);
+});
+
+// ---- strict editor accessors ----
+
+test('scrollToEdge fails loudly without a model or editor', async () => {
+  const page = bootEditorPage();
+  page.editor.setModel(null);
+  const bottom = await dispatch(page, 'editor.scrollToEdge', { edge: 'bottom' });
+  assert.equal(bottom.ok, false, 'no model must be an error, not false');
+  assert.match(bottom.error.message, /no active model/);
+
+  page.sandbox.editor = null;
+  const top = await dispatch(page, 'editor.scrollToEdge', { edge: 'top' });
+  assert.equal(top.ok, false, 'no editor must be an error, not false');
+  assert.match(top.error.message, /not ready/);
+});
+
+test('getSelection and getCursor report a missing editor as not ready', async () => {
+  const page = bootEditorPage();
+  page.sandbox.editor = null;
+  for (const method of ['editor.getSelection', 'editor.getCursor']) {
+    const response = await dispatch(page, method);
+    assert.equal(response.ok, false, method);
+    assert.equal(response.error.message, 'Monaco editor is not ready.', method);
+  }
+});
+
+// ---- markers ----
+
+test('setMarkers maps tag names and related resources to Monaco shapes', async () => {
+  const page = bootEditorPage();
+  const response = await dispatch(page, 'document.setMarkers', {
+    uri: null,
+    owner: 'lint',
+    markers: [
+      {
+        ...range(1, 1, 1, 5),
+        message: 'unused',
+        severity: 4,
+        tags: ['unnecessary', 'Deprecated', 'not-a-tag', 2],
+        relatedInformation: [
+          {
+            resource: 'file:///other.ts',
+            ...range(2, 1, 2, 4),
+            message: 'declared here',
+          },
+        ],
+      },
+      { ...range(1, 1, 1, 2), message: 'plain', severity: 8 },
+    ],
+  });
+  assert.equal(response.ok, true);
+
+  const call = page.sandbox.__markerCalls.at(-1);
+  assert.equal(call.owner, 'lint');
+  assert.equal(call.model, page.bootModel);
+  const [tagged, plain] = call.markers;
+  assert.deepEqual(tagged.tags, [1, 2, 2]);
+  const related = tagged.relatedInformation[0];
+  assert.ok(
+    related.resource instanceof page.sandbox.monaco.Uri,
+    'resource must be a monaco.Uri (hover reads resource.path)',
+  );
+  assert.equal(related.resource.toString(), 'file:///other.ts');
+  assert.equal(related.resource.path, '/other.ts');
+  assert.equal(related.message, 'declared here');
+  assert.equal(related.startLineNumber, 2);
+  assert.equal(tagged.message, 'unused');
+  assert.equal(tagged.severity, 4);
+  assert.equal(plain.tags, undefined);
+  assert.equal(plain.relatedInformation, undefined);
+});
+
+test('the legacy setModelMarkers helper maps markers the same way', () => {
+  const page = bootEditorPage();
+  page.sandbox.flutterMonaco.setModelMarkers('legacy', [
+    { ...range(1, 1, 1, 2), message: 'm', tags: ['deprecated'] },
+  ]);
+  assert.deepEqual(page.sandbox.__markerCalls.at(-1).markers[0].tags, [2]);
+});

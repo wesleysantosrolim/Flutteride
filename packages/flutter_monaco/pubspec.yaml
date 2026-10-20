@@ -1,0 +1,76 @@
+name: flutter_monaco
+description: Integrate Monaco Editor (VS Code's editor) in Flutter apps. Features 100+ languages, syntax highlighting, themes, and full API.
+version: 4.0.0
+homepage: https://github.com/omar-hanafy/flutter_monaco
+repository: https://github.com/omar-hanafy/flutter_monaco
+issue_tracker: https://github.com/omar-hanafy/flutter_monaco/issues
+documentation: https://github.com/omar-hanafy/flutter_monaco#readme
+
+topics:
+  - vscode
+  - monaco
+  - editor
+  - markdown
+  - ide
+
+platforms:
+  android:
+  ios:
+  macos:
+  windows:
+  web:
+  # linux: # Not yet supported (no webview support yet)
+
+environment:
+  sdk: ^3.13.5
+  flutter: ">=3.47.7"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  freezed_annotation: ^3.1.0
+  material_ui: ^1.6.0
+  path: ^1.9.1
+  path_provider: ^2.1.6
+  web: ^1.1.1
+  webview_flutter: ^4.14.1
+  webview_flutter_windows: ^1.3.0
+
+dev_dependencies:
+  build_runner: ^2.16.2
+  fake_async: ^1.3.3
+  flutter_lints: 6.0.0
+  flutter_test:
+    sdk: flutter
+  freezed: ^4.0.2
+  path_provider_platform_interface: ^2.1.3
+  # platform 3.0.0 uses the removed dart:io Platform.packageRoot API.
+  # Keep the lowest-dependency test graph buildable on the supported SDK.
+  platform: ^3.2.0
+
+flutter:
+  # Native macOS helper for the WKWebView first-responder handoff
+  # (flutter_monaco/native_focus method channel). Other platforms need no
+  # native code here: Windows focus lives in webview_flutter_windows, and
+  # Android/iOS/Web WebViews participate in the regular platform focus
+  # system. The top-level `platforms:` key above keeps the pub.dev platform
+  # listing complete.
+  plugin:
+    platforms:
+      macos:
+        pluginClass: FlutterMonacoPlugin
+  assets:
+    - assets/github.svg
+    - pubspec.yaml
+    - assets/monaco/
+    - assets/monaco/bridge/
+    - assets/monaco/min/
+    - assets/monaco/min/vs/
+    - assets/monaco/min/vs/assets/
+    - assets/monaco/min/vs/editor/
+    - assets/monaco/min/vs/basic-languages/
+    - assets/monaco/min/vs/language/
+    - assets/monaco/min/vs/language/css/
+    - assets/monaco/min/vs/language/html/
+    - assets/monaco/min/vs/language/json/
+    - assets/monaco/min/vs/language/typescript/

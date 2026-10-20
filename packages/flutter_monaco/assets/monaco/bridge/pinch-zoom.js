@@ -1,0 +1,369 @@
+(function () {
+  'use strict';
+
+  window.__FMB = window.__FMB || {};
+
+  window.__FMB.pinchZoom = function (ctx) {
+    var editor = ctx && typeof ctx.E === 'function'
+      ? ctx.E()
+      : window.editor;
+
+    if (!editor || typeof editor.getDomNode !== 'function') return;
+
+    var container = document.getElementById('editor-container');
+    if (!container || container.__flutteridePinchZoomBound) return;
+
+    container.__flutteridePinchZoomBound = true;
+
+    // flutteride-signature-help-collision-avoidance
+    // Keep the signature widget away from the active cursor.
+    var signatureStyle = document.getElementById(
+      'flutteride-signature-help-fixed-style'
+    );
+
+    if (!signatureStyle) {
+      signatureStyle = document.createElement('style');
+      signatureStyle.id = 'flutteride-signature-help-fixed-style';
+      signatureStyle.textContent =
+        '.monaco-editor .parameter-hints-widget {' +
+        ' position: fixed !important;' +
+        ' top: 8px !important;' +
+        ' left: 8px !important;' +
+        ' right: auto !important;' +
+        ' bottom: auto !important;' +
+        ' max-width: calc(100vw - 16px) !important;' +
+        ' z-index: 1000 !important;' +
+        '}';
+      document.head.appendChild(signatureStyle);
+    }
+
+    var signaturePositionFrame = 0;
+    var signatureLastPosition = '';
+    var signatureObserver = null;
+
+    function scheduleSignaturePosition() {
+      if (signaturePositionFrame) return;
+
+      signaturePositionFrame = window.requestAnimationFrame(function () {
+        signaturePositionFrame = 0;
+        positionSignatureHelp();
+      });
+    }
+
+    function positionSignatureHelp() {
+      try {
+        var widget = document.querySelector(
+          '.monaco-editor .parameter-hints-widget'
+        );
+
+        if (!widget || !editor ||
+            typeof editor.getPosition !== 'function' ||
+            typeof editor.getScrolledVisiblePosition !== 'function') {
+          return;
+        }
+
+        var visible = window.getComputedStyle(widget).display !== 'none' &&
+          window.getComputedStyle(widget).visibility !== 'hidden';
+
+        if (!visible) return;
+
+        // IntelliSense has priority over Signature Help.
+        var suggestWidget = document.querySelector(
+          '.monaco-editor .suggest-widget'
+        );
+
+        if (suggestWidget) {
+          var suggestStyle = window.getComputedStyle(suggestWidget);
+          var suggestVisible =
+            suggestStyle.display !== 'none' &&
+            suggestStyle.visibility !== 'hidden' &&
+            suggestStyle.opacity !== '0' &&
+            suggestWidget.getBoundingClientRect().width > 0 &&
+            suggestWidget.getBoundingClientRect().height > 0;
+
+          if (suggestVisible) {
+            widget.style.setProperty('visibility', 'hidden', 'important');
+            return;
+          }
+        }
+
+        var cursorPosition = editor.getPosition();
+        if (!cursorPosition) return;
+
+        var cursor = editor.getScrolledVisiblePosition(cursorPosition);
+        if (!cursor) return;
+
+        var viewportWidth = document.documentElement.clientWidth;
+        var viewportHeight = document.documentElement.clientHeight;
+        var gap = 8;
+        var cursorMargin = 5;
+
+        // Convert Monaco layout coordinates to visual coordinates.
+        // The editor container uses CSS zoom during pinch gestures.
+        var visualScale = parseFloat(
+          window.getComputedStyle(container).zoom
+        );
+
+        if (!isFinite(visualScale) || visualScale <= 0) {
+          visualScale = 1;
+        }
+
+        var cursorLeft = cursor.left * visualScale;
+        var cursorTop = cursor.top * visualScale;
+        var cursorWidth = Math.max((cursor.width || 1) * visualScale, 2);
+        var cursorHeight = cursor.height * visualScale;
+        var cursorRight = cursorLeft + cursorWidth;
+        var cursorBottom = cursorTop + cursorHeight;
+
+        var widgetRect = widget.getBoundingClientRect();
+        var widgetWidth = Math.min(
+          widgetRect.width || widget.offsetWidth || 280,
+          viewportWidth - gap * 2
+        );
+        var widgetHeight = widgetRect.height || widget.offsetHeight || 100;
+
+        var left = Math.max(
+          gap,
+          Math.min(cursorLeft, viewportWidth - widgetWidth - gap)
+        );
+
+        var candidates = [
+          cursorBottom + cursorMargin,
+          cursorTop - widgetHeight - cursorMargin,
+          gap
+        ];
+
+        var chosenTop = null;
+
+        for (var i = 0; i < candidates.length; i++) {
+          var candidateTop = candidates[i];
+
+          if (candidateTop < gap ||
+              candidateTop + widgetHeight > viewportHeight - gap) {
+            continue;
+          }
+
+          var overlapsCursor =
+            candidateTop < cursorBottom + cursorMargin &&
+            candidateTop + widgetHeight > cursorTop - cursorMargin &&
+            left < cursorRight + cursorMargin &&
+            left + widgetWidth > cursorLeft - cursorMargin;
+
+          if (!overlapsCursor) {
+            chosenTop = candidateTop;
+            break;
+          }
+        }
+
+        if (chosenTop === null) {
+          widget.style.setProperty('visibility', 'hidden', 'important');
+          return;
+        }
+
+        var positionKey =
+          Math.round(left) + ':' + Math.round(chosenTop) + ':' +
+          Math.round(widgetWidth) + ':' + Math.round(widgetHeight);
+
+        widget.style.setProperty('visibility', 'visible', 'important');
+        widget.style.setProperty('top', Math.round(chosenTop) + 'px', 'important');
+        widget.style.setProperty('left', Math.round(left) + 'px', 'important');
+        widget.style.setProperty('right', 'auto', 'important');
+        widget.style.setProperty('bottom', 'auto', 'important');
+        widget.style.setProperty('max-width', 'calc(100vw - 16px)', 'important');
+
+        signatureLastPosition = positionKey;
+      } catch (error) {
+        console.warn(
+          '[FlutterMonaco SignatureHelp] Position failed:',
+          error
+        );
+      }
+    }
+
+    if (typeof editor.onDidChangeCursorPosition === 'function') {
+      editor.onDidChangeCursorPosition(scheduleSignaturePosition);
+    }
+
+    if (typeof editor.onDidScrollChange === 'function') {
+      editor.onDidScrollChange(scheduleSignaturePosition);
+    }
+
+    if (typeof editor.onDidLayoutChange === 'function') {
+      editor.onDidLayoutChange(scheduleSignaturePosition);
+    }
+
+    if (typeof MutationObserver !== 'undefined') {
+      signatureObserver = new MutationObserver(function (mutations) {
+        var relevant = false;
+
+        for (var i = 0; i < mutations.length; i++) {
+          var target = mutations[i].target;
+
+          if (target && target.nodeType === 1 &&
+              target.classList &&
+              target.classList.contains('parameter-hints-widget')) {
+            relevant = true;
+            break;
+          }
+
+          if (mutations[i].type === 'childList') {
+            relevant = true;
+            break;
+          }
+        }
+
+        if (relevant) scheduleSignaturePosition();
+      });
+
+      signatureObserver.observe(container, {
+        childList: true,
+        subtree: true
+      });
+
+      var initialWidget = document.querySelector(
+        '.monaco-editor .parameter-hints-widget'
+      );
+
+      if (initialWidget) {
+        signatureObserver.observe(initialWidget, {
+          attributes: true,
+          attributeFilter: ['class', 'style']
+        });
+      }
+    }
+
+    // Watch IntelliSense visibility changes without observing our own
+    // Signature Help style updates.
+    var suggestVisibilityObserver = null;
+
+    if (typeof MutationObserver !== 'undefined') {
+      suggestVisibilityObserver = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var target = mutations[i].target;
+
+          if (target && target.nodeType === 1 && target.classList &&
+              target.classList.contains('suggest-widget')) {
+            scheduleSignaturePosition();
+            return;
+          }
+        }
+      });
+
+      suggestVisibilityObserver.observe(container, {
+        attributes: true,
+        subtree: true,
+        attributeFilter: ['style', 'class']
+      });
+    }
+
+    window.addEventListener('resize', scheduleSignaturePosition);
+    scheduleSignaturePosition();
+
+
+
+    var minZoom = 0.75;
+    var maxZoom = 1.75;
+    var zoom = 1;
+    var startZoom = 1;
+    var startDistance = 0;
+    var active = false;
+
+    function distance(touches) {
+      var dx = touches[0].clientX - touches[1].clientX;
+      var dy = touches[0].clientY - touches[1].clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function applyZoom(nextZoom) {
+      zoom = Math.max(minZoom, Math.min(maxZoom, nextZoom));
+
+      /*
+       * CSS zoom is used instead of transform so Chromium can account
+       * for the scaled element during hit testing.
+       */
+      container.style.zoom = String(zoom);
+
+      /*
+       * Keep the visible editor area equal to the WebView viewport
+       * after scaling. Monaco therefore lays out at the corresponding
+       * logical dimensions.
+       */
+      var width = document.documentElement.clientWidth;
+      var height = document.documentElement.clientHeight;
+
+      container.style.width = (width / zoom) + 'px';
+      container.style.height = (height / zoom) + 'px';
+
+      try {
+        if (editor && typeof editor.layout === 'function') {
+          editor.layout({
+            width: Math.round(width / zoom),
+            height: Math.round(height / zoom)
+          });
+        }
+      } catch (error) {
+        console.warn('[FlutterMonaco PinchZoom] Layout failed:', error);
+      }
+    }
+
+    function onTouchStart(event) {
+      if (!event.touches || event.touches.length !== 2) {
+        active = false;
+        return;
+      }
+
+      startDistance = distance(event.touches);
+      startZoom = zoom;
+      active = startDistance > 0;
+
+      if (active && event.cancelable) {
+        event.preventDefault();
+      }
+    }
+
+    function onTouchMove(event) {
+      if (!active || !event.touches || event.touches.length !== 2) {
+        return;
+      }
+
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+
+      var currentDistance = distance(event.touches);
+      if (startDistance <= 0 || currentDistance <= 0) return;
+
+      var ratio = currentDistance / startDistance;
+      var nextZoom = startZoom * ratio;
+
+      if (Math.abs(nextZoom - zoom) >= 0.015) {
+        applyZoom(nextZoom);
+      }
+    }
+
+    function onTouchEnd(event) {
+      if (!event.touches || event.touches.length < 2) {
+        active = false;
+      }
+    }
+
+    container.addEventListener('touchstart', onTouchStart, {
+      passive: false
+    });
+    container.addEventListener('touchmove', onTouchMove, {
+      passive: false
+    });
+    container.addEventListener('touchend', onTouchEnd, {
+      passive: true
+    });
+    container.addEventListener('touchcancel', onTouchEnd, {
+      passive: true
+    });
+
+    window.addEventListener('resize', function () {
+      if (zoom !== 1) applyZoom(zoom);
+    });
+
+    console.log('[FlutterMonaco PinchZoom] Whole-editor zoom initialized.');
+  };
+})();

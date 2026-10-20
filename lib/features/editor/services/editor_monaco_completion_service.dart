@@ -1,0 +1,1314 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_monaco/flutter_monaco.dart';
+
+import 'dart_analysis_service.dart';
+import 'editor_analysis_coordinator.dart';
+import 'editor_autocomplete_file_logger.dart';
+
+class EditorMonacoCompletionService {
+  EditorMonacoCompletionService({required this.analysisCoordinator});
+
+  final EditorAnalysisCoordinator analysisCoordinator;
+
+  MonacoController? _controller;
+  MonacoCompletionRegistration? _registration;
+
+  String? _activeFilePath;
+
+  bool _disposed = false;
+  bool _registering = false;
+  bool _ghostTextInstalled = false;
+  bool _signatureHelpDiagnosticExecuted = false;
+  bool _signatureHelpInstalled = false;
+
+  static const String _providerId = 'flutteride-dart-analysis';
+
+  static const String _ghostTextInstallScript = r'''
+(() => {
+  const stateKey = '__flutterideDartGhostText';
+  const previous = window[stateKey];
+
+  if (previous) {
+    try { previous.provider?.dispose?.(); } catch (_) {}
+    try { previous.action?.dispose?.(); } catch (_) {}
+    try { previous.styleElement?.remove?.(); } catch (_) {}
+  }
+
+  const styleEl = document.createElement('style');
+  styleEl.innerHTML = `
+    .monaco-editor .inline-completions-actions,
+    .monaco-editor .suggest-alternative-widgets,
+    .monaco-editor .interactive-inline-completions {
+      display: none !important;
+    }
+  `;
+  document.head.appendChild(styleEl);
+
+  let requestSequence = 0;
+  const emptyResult = { items: [] };
+
+  function parseSnippet(source) {
+    let text = '';
+    let firstPlaceholder = null;
+    let finalPlaceholder = null;
+    let lastIndex = 0;
+
+    const pattern = /\$\{(\d+)(?::([^}]*))?\}|\$(\d+)/g;
+    let match;
+
+    while ((match = pattern.exec(source)) !== null) {
+      text += source.slice(lastIndex, match.index);
+
+      const index = Number(match[1] ?? match[3]);
+      const defaultText = match[2] ?? '';
+
+      if (index > 0 && firstPlaceholder === null) {
+        firstPlaceholder = text.length;
+      }
+
+      if (index === 0 && finalPlaceholder === null) {
+        finalPlaceholder = text.length;
+      }
+
+      text += defaultText;
+      lastIndex = pattern.lastIndex;
+    }
+
+    text += source.slice(lastIndex);
+
+    return {
+      text,
+      cursorOffset:
+        firstPlaceholder ?? finalPlaceholder ?? text.length
+    };
+  }
+
+  const provider = {
+    provideInlineCompletions: async (
+      model,
+      position,
+      context,
+      token
+    ) => {
+      try {
+        if (!model || model.getLanguageId() !== 'dart') {
+          return emptyResult;
+        }
+
+        if (
+          !window.FlutterMonaco ||
+          typeof window.FlutterMonaco.request !== 'function'
+        ) {
+          return emptyResult;
+        }
+
+        const lineNumber = position.lineNumber;
+        const column = position.column;
+        const lineText = model.getLineContent(lineNumber);
+        const word = model.getWordUntilPosition(position);
+
+        const prefix = lineText.slice(
+          word.startColumn - 1,
+          column - 1
+        );
+
+        if (column < word.endColumn) {
+          return emptyResult;
+        }
+
+        const range = new monaco.Range(
+          lineNumber,
+          word.startColumn,
+          lineNumber,
+          column
+        );
+
+        const defaultRange = {
+          startLineNumber: lineNumber,
+          startColumn: word.startColumn,
+          endLineNumber: lineNumber,
+          endColumn: column
+        };
+
+        const pending = window.FlutterMonaco.request(
+          'completion',
+          {
+            providerId: 'flutteride-dart-analysis',
+            requestId: 'flutteride-ghost:' + (++requestSequence),
+            language: 'dart',
+            uri: model.uri?.toString(),
+            position: { lineNumber, column },
+            defaultRange,
+            lineText,
+            triggerKind: context?.triggerKind ?? null,
+            triggerCharacter: null
+          }
+        );
+
+        if (!pending || !pending.promise) {
+          return emptyResult;
+        }
+
+        if (token?.onCancellationRequested) {
+          token.onCancellationRequested(() => {
+            try {
+              window.FlutterMonaco.dropRequest?.(pending.id);
+            } catch (_) {}
+          });
+        }
+
+        const payload = await pending.promise;
+
+        if (token?.isCancellationRequested || model.isDisposed()) {
+          return emptyResult;
+        }
+
+        const suggestions = payload?.suggestions || [];
+
+        for (const item of suggestions) {
+          const originalText = item.insertText ?? item.label;
+
+          if (
+            typeof originalText !== 'string' ||
+            originalText.length === 0
+          ) {
+            continue;
+          }
+
+          const parsed = parseSnippet(originalText);
+          let cleanText = parsed.text;
+          let cursorOffset = parsed.cursorOffset;
+
+          if (prefix && !cleanText.startsWith(prefix)) {
+            if (item.label && item.label.startsWith(prefix)) {
+              cleanText = item.label;
+              cursorOffset = cleanText.length;
+            } else {
+              continue;
+            }
+          }
+
+          if (cleanText === prefix) {
+            continue;
+          }
+
+          cursorOffset = Math.min(cursorOffset, cleanText.length);
+
+          window[stateKey].pendingSuggestion = {
+            model,
+            range,
+            text: cleanText,
+            cursorOffset,
+            uri: model.uri?.toString()
+          };
+
+          return {
+            items: [{
+              insertText: cleanText,
+              range
+            }]
+          };
+        }
+
+        return emptyResult;
+      } catch (_) {
+        return emptyResult;
+      }
+    },
+
+    freeInlineCompletions() {}
+  };
+
+  const providerDisposable =
+    monaco.languages.registerInlineCompletionsProvider('dart', provider);
+
+  let actionDisposable = null;
+  const editor = monaco.editor.getEditors()[0];
+
+  if (editor) {
+    try {
+      actionDisposable = editor.addAction({
+        id: 'flutteride.ghostText.acceptTab',
+        label: 'Accept FlutterIDE inline suggestion',
+        keybindings: [monaco.KeyCode.Tab],
+        precondition: 'inlineSuggestionVisible',
+
+        run: async (activeEditor) => {
+          const state = window[stateKey];
+          const suggestion = state?.pendingSuggestion;
+          const model = activeEditor.getModel();
+
+          if (
+            !suggestion ||
+            !model ||
+            model !== suggestion.model ||
+            model.isDisposed()
+          ) {
+            const fallback = activeEditor.getAction(
+              'editor.action.inlineSuggest.commit'
+            );
+
+            if (fallback) {
+              return fallback.run();
+            }
+
+            return;
+          }
+
+          const startOffset = model.getOffsetAt(
+            suggestion.range.getStartPosition()
+          );
+
+          activeEditor.pushUndoStop();
+
+          const applied = activeEditor.executeEdits(
+            'flutteride-ghost-text',
+            [{
+              range: suggestion.range,
+              text: suggestion.text,
+              forceMoveMarkers: true
+            }]
+          );
+
+          if (!applied) {
+            const fallback = activeEditor.getAction(
+              'editor.action.inlineSuggest.commit'
+            );
+
+            if (fallback) {
+              return fallback.run();
+            }
+
+            return;
+          }
+
+          const targetOffset = Math.min(
+            startOffset + suggestion.cursorOffset,
+            model.getValueLength()
+          );
+
+          activeEditor.setPosition(model.getPositionAt(targetOffset));
+          activeEditor.revealPositionIfOutsideViewport(
+            activeEditor.getPosition()
+          );
+          activeEditor.focus();
+          activeEditor.pushUndoStop();
+
+          state.pendingSuggestion = null;
+        }
+      });
+    } catch (_) {}
+  }
+
+  window[stateKey] = {
+    provider: providerDisposable,
+    action: actionDisposable,
+    styleElement: styleEl,
+    pendingSuggestion: null
+  };
+
+  if (window.flutterMonaco?.updateOptions) {
+    window.flutterMonaco.updateOptions({
+      inlineSuggest: {
+        enabled: true,
+        showToolbar: 'never'
+      }
+    });
+  }
+})();
+
+''';
+
+  /// Registra um Signature Help real, solicitando as assinaturas ao
+  /// Dart Analysis Server por meio da ponte FlutterMonaco.
+  ///
+  /// A ponte FlutterMonaco precisa encaminhar a requisição
+  /// "signatureHelp" para o Dart e devolver o resultado LSP.
+  static const String _signatureHelpInstallScript = r'''
+(() => {
+  const stateKey = '__flutterideSignatureHelp';
+  
+  try {
+    window[stateKey]?.provider?.dispose?.();
+  } catch (_) {}
+
+  const provider = {
+    signatureHelpTriggerCharacters: ['(', ','],
+    signatureHelpRetriggerCharacters: [','],
+
+    async provideSignatureHelp(model, position, token, context) {
+      try {
+        if (!model || model.getLanguageId() !== 'dart') {
+          return null;
+        }
+
+        if (
+          !window.FlutterMonaco ||
+          typeof window.FlutterMonaco.request !== 'function'
+        ) {
+          return null;
+        }
+
+        const pending = window.FlutterMonaco.request(
+          'signatureHelp',
+          {
+            providerId: 'flutteride-dart-analysis',
+            uri: model.uri?.toString(),
+            language: 'dart',
+
+            // Monaco usa posições começando em 1.
+            // A ponte Dart deve converter para posições LSP começando em 0.
+            position: {
+              lineNumber: position.lineNumber,
+              column: position.column
+            },
+
+            triggerCharacter: context?.triggerCharacter ?? null,
+            isRetrigger: !!context?.isRetrigger
+          }
+        );
+
+        if (!pending || !pending.promise) {
+          return null;
+        }
+
+        if (token?.onCancellationRequested) {
+          token.onCancellationRequested(() => {
+            try {
+              window.FlutterMonaco.dropRequest?.(pending.id);
+            } catch (_) {}
+          });
+        }
+
+        const payload = await pending.promise;
+
+        if (token?.isCancellationRequested) {
+          return null;
+        }
+
+        if (!payload || !Array.isArray(payload.signatures)) {
+          return null;
+        }
+
+        return {
+          value: {
+            signatures: payload.signatures,
+            activeSignature: Number.isInteger(payload.activeSignature)
+              ? payload.activeSignature
+              : 0,
+            activeParameter: Number.isInteger(payload.activeParameter)
+              ? payload.activeParameter
+              : 0
+          },
+          dispose() {}
+        };
+      } catch (error) {
+        console.warn(
+          '[FlutterIDE SignatureHelp] Falha ao consultar Dart Analysis Server:',
+          error
+        );
+        return null;
+      }
+    }
+  };
+
+  const disposable =
+    monaco.languages.registerSignatureHelpProvider('dart', provider);
+
+  let cursorListener = null;
+  const editor = monaco.editor.getEditors()[0];
+
+  if (editor) {
+    cursorListener = editor.onDidChangeCursorPosition((event) => {
+      try {
+        const model = editor.getModel();
+        if (!model || model.getLanguageId() !== 'dart') return;
+
+        const position = event.position;
+        const textBeforeCursor = model.getValueInRange({
+          startLineNumber: 1,
+          startColumn: 1,
+          endLineNumber: position.lineNumber,
+          endColumn: position.column
+        });
+
+        let depth = 0;
+
+        for (const character of textBeforeCursor) {
+          if (character === '(') depth++;
+          if (character === ')' && depth > 0) depth--;
+        }
+
+        if (depth > 0) {
+          editor.trigger(
+            'flutteride-signature-help',
+            'editor.action.triggerParameterHints',
+            {}
+          );
+        }
+      } catch (error) {
+        console.warn(
+          '[FlutterIDE SignatureHelp] Falha ao acionar dicas pelo cursor:',
+          error
+        );
+      }
+    });
+  }
+
+  window[stateKey] = {
+    provider: disposable,
+    cursorListener: cursorListener
+  };
+
+  console.log(
+    '[FlutterIDE SignatureHelp] Provedor conectado à ponte Dart registrado.'
+  );
+
+  return 'Provedor de Signature Help registrado.';
+})();
+''';
+
+  static const String _signatureHelpDisposeScript = r'''
+(() => {
+  const stateKey = '__flutterideSignatureHelp';
+
+  try {
+    window[stateKey]?.cursorListener?.dispose?.();
+  } catch (_) {}
+
+  try {
+    window[stateKey]?.provider?.dispose?.();
+  } catch (_) {}
+
+  delete window[stateKey];
+
+  return 'Provedor de Signature Help removido.';
+})();
+''';
+
+  static const String _ghostTextDisposeScript = r'''
+(() => {
+  const stateKey = '__flutterideDartGhostText';
+  const state = window[stateKey];
+
+  if (state) {
+    try { state.provider?.dispose?.(); } catch (_) {}
+    try { state.action?.dispose?.(); } catch (_) {}
+    try { state.styleElement?.remove?.(); } catch (_) {}
+    delete window[stateKey];
+  }
+
+  if (window.flutterMonaco?.updateOptions) {
+    window.flutterMonaco.updateOptions({
+      inlineSuggest: {
+        enabled: false
+      }
+    });
+  }
+})();
+''';
+
+  /// Diagnóstico isolado do suporte a Signature Help.
+  ///
+  /// Não registra provedores nem modifica as opções do editor.
+  static const String _signatureHelpDiagnosticScript = r'''
+(() => {
+  const result = {
+    monacoAvailable: typeof monaco !== 'undefined',
+    languagesAvailable: false,
+    registerSignatureHelpProviderAvailable: false,
+    editorsCount: -1,
+    monacoVersion: 'indisponível'
+  };
+
+  try {
+    if (typeof monaco !== 'undefined') {
+      result.languagesAvailable = !!monaco.languages;
+
+      result.registerSignatureHelpProviderAvailable =
+        typeof monaco.languages?.registerSignatureHelpProvider
+          === 'function';
+
+      result.monacoVersion = monaco.version || 'não informada';
+
+      result.editorsCount =
+        typeof monaco.editor?.getEditors === 'function'
+          ? monaco.editor.getEditors().length
+          : -1;
+
+      const editor =
+        typeof monaco.editor?.getEditors === 'function'
+          ? monaco.editor.getEditors()[0]
+          : null;
+
+      result.editorAvailable = !!editor;
+      result.modelAvailable = !!editor?.getModel();
+
+      if (editor?.getModel()) {
+        result.language = editor.getModel().getLanguageId();
+
+        result.parameterHintsOption =
+          editor.getOption(monaco.editor.EditorOption.parameterHints);
+      }
+    }
+  } catch (error) {
+    result.diagnosticError = String(error);
+  }
+
+  window.__flutterideSignatureHelpDiagnostic = result;
+
+  console.log(
+    '[FlutterIDE SignatureHelp Diagnostic]',
+    JSON.stringify(result)
+  );
+
+  return JSON.stringify(result);
+})();
+''';
+
+  Future<void> attachController(MonacoController controller) async {
+    if (_disposed) return;
+
+    _controller = controller;
+
+    await _log('attachController.');
+
+    try {
+      await controller.whenReady;
+
+      await _log('MonacoController pronto.');
+    } catch (error, stackTrace) {
+      await _log('ERRO whenReady: $error\n$stackTrace');
+
+      debugPrint(
+        '[EditorMonacoCompletionService] '
+        'Erro aguardando Monaco: $error',
+      );
+
+      debugPrintStack(stackTrace: stackTrace);
+
+      return;
+    }
+
+    if (_disposed || _controller != controller) {
+      return;
+    }
+
+    controller.setSignatureHelpHandler((request) async {
+      try {
+        if (_disposed || _controller != controller) {
+          return null;
+        }
+
+        final uriValue = request['uri'];
+        final positionValue = request['position'];
+
+        if (uriValue is! String || positionValue is! Map) {
+          await _log('[SIGNATURE] Invalid URI or position.');
+          return null;
+        }
+
+        final position = Map<String, dynamic>.from(positionValue);
+        final lineNumber = position['lineNumber'];
+        final column = position['column'];
+
+        if (lineNumber is! num || column is! num) {
+          await _log('[SIGNATURE] Invalid line or column.');
+          return null;
+        }
+
+        final uri = Uri.tryParse(uriValue);
+        if (uri == null) {
+          await _log('[SIGNATURE] Invalid URI.');
+          return null;
+        }
+
+        final path = _pathFromMonacoUri(uri);
+        if (path == null || path.trim().isEmpty || !_isDartFile(path)) {
+          await _log('[SIGNATURE] Dart file path not found: $uriValue');
+          return null;
+        }
+
+        final line = lineNumber.toInt() - 1;
+        final monacoCharacter = column.toInt() - 1;
+
+        if (line < 0 || monacoCharacter < 0) {
+          return null;
+        }
+
+        final currentContent = await _synchronizeCurrentDocument(path);
+
+        if (_disposed || _controller != controller) {
+          return null;
+        }
+
+        final character = _normalizeCompletionCharacterFromText(
+          text: currentContent,
+          line: line,
+          character: monacoCharacter,
+        );
+
+        await _log(
+          '[SIGNATURE] path=$path line=$line character=$character '
+          'trigger=${request['triggerCharacter'] ?? '-'}',
+        );
+
+        final result = await analysisCoordinator.signatureHelp(
+          path: path,
+          line: line,
+          character: character,
+          triggerCharacter: request['triggerCharacter'] is String
+              ? request['triggerCharacter'] as String
+              : null,
+          isRetrigger: request['isRetrigger'] == true,
+        );
+
+        await _log(
+          result == null
+              ? '[SIGNATURE] Analysis Server returned null.'
+              : '[SIGNATURE] Analysis Server response received.',
+        );
+
+        return result;
+      } catch (error, stackTrace) {
+        await _log('[SIGNATURE] ERROR: $error\n$stackTrace');
+        return null;
+      }
+    });
+
+    await _log('Signature Help callback connected to Analysis Coordinator.');
+
+    await _registerDartCompletionProvider(controller);
+  }
+
+  void setActiveFile(String? filePath) {
+    _activeFilePath = filePath;
+
+    unawaited(_log('Arquivo ativo: ${filePath ?? '-'}'));
+  }
+
+  /// Abre manualmente a lista de sugestões IntelliSense do Monaco.
+  Future<void> triggerIntelliSense() async {
+    final controller = _controller;
+
+    if (_disposed || controller == null) {
+      await _log(
+        '[INTELLISENSE] Não foi possível abrir: controller indisponível.',
+      );
+      return;
+    }
+
+    try {
+      await controller.whenReady;
+
+      if (_disposed || _controller != controller) return;
+
+      await controller.runJavaScript(r'''
+(() => {
+  const editor = monaco.editor.getEditors()[0];
+
+  if (!editor || !editor.getModel()) {
+    console.warn('[FlutterIDE IntelliSense] Editor ou modelo indisponível.');
+    return 'Editor indisponível';
+  }
+
+  if (editor.getModel().getLanguageId() !== 'dart') {
+    console.log('[FlutterIDE IntelliSense] O arquivo atual não é Dart.');
+  }
+
+  editor.focus();
+  editor.trigger(
+    'flutteride-button',
+    'editor.action.triggerSuggest',
+    {}
+  );
+
+  console.log('[FlutterIDE IntelliSense] Sugestões solicitadas pelo botão.');
+  return 'Sugestões solicitadas';
+})();
+''');
+
+      await _log('[INTELLISENSE] Solicitação de sugestões enviada ao Monaco.');
+    } catch (error, stackTrace) {
+      await _log('[INTELLISENSE] Erro ao abrir sugestões: $error\n$stackTrace');
+      debugPrint('[EditorMonacoCompletionService] IntelliSense: $error');
+    }
+  }
+
+  Future<void> _registerDartCompletionProvider(
+    MonacoController controller,
+  ) async {
+    if (_disposed || _registering) {
+      return;
+    }
+
+    _registering = true;
+
+    try {
+      await _log('Registrando CompletionProvider Dart.');
+
+      final oldRegistration = _registration;
+      _registration = null;
+
+      if (oldRegistration != null) {
+        try {
+          await oldRegistration.dispose();
+
+          await _log('Provider anterior removido.');
+        } catch (error) {
+          await _log('ERRO removendo provider anterior: $error');
+        }
+      }
+
+      final registration = await controller.registerCompletions(
+        id: _providerId,
+        languages: const [MonacoLanguage.dart],
+        triggerCharacters: const ['.', ':'],
+        provider: _provideDartCompletions,
+      );
+
+      if (_disposed || _controller != controller) {
+        try {
+          await registration.dispose();
+        } catch (_) {}
+
+        return;
+      }
+
+      _registration = registration;
+
+      await _log('CompletionProvider Dart registrado.');
+
+      await _installGhostTextProvider(controller);
+
+      await _installSignatureHelpProvider(controller);
+
+      await _runSignatureHelpDiagnostic(controller);
+    } catch (error, stackTrace) {
+      await _log('ERRO registrando provider: $error\n$stackTrace');
+
+      debugPrint(
+        '[EditorMonacoCompletionService] '
+        'Erro ao registrar provider: $error',
+      );
+
+      debugPrintStack(stackTrace: stackTrace);
+    } finally {
+      _registering = false;
+    }
+  }
+
+  Future<void> _installGhostTextProvider(MonacoController controller) async {
+    if (_disposed || _controller != controller) {
+      return;
+    }
+
+    try {
+      await controller.runJavaScript(_ghostTextInstallScript);
+
+      if (_disposed || _controller != controller) {
+        return;
+      }
+
+      _ghostTextInstalled = true;
+
+      await _log('Provedor de ghost text registrado no Monaco.');
+    } catch (error, stackTrace) {
+      _ghostTextInstalled = false;
+
+      await _log('ERRO instalando ghost text: $error\n$stackTrace');
+
+      debugPrint(
+        '[EditorMonacoCompletionService] '
+        'Erro instalando ghost text: $error',
+      );
+    }
+  }
+
+  Future<void> _installSignatureHelpProvider(
+    MonacoController controller,
+  ) async {
+    if (_disposed || _controller != controller) {
+      return;
+    }
+
+    try {
+      await controller.runJavaScript(_signatureHelpInstallScript);
+
+      if (_disposed || _controller != controller) {
+        return;
+      }
+
+      _signatureHelpInstalled = true;
+
+      await _log('Provedor de Signature Help real registrado no Monaco.');
+    } catch (error, stackTrace) {
+      _signatureHelpInstalled = false;
+
+      await _log('ERRO instalando Signature Help: $error\n$stackTrace');
+
+      debugPrint(
+        '[EditorMonacoCompletionService] '
+        'Erro instalando Signature Help: $error',
+      );
+
+      debugPrintStack(stackTrace: stackTrace);
+    }
+  }
+
+  Future<void> _runSignatureHelpDiagnostic(MonacoController controller) async {
+    if (_disposed ||
+        _controller != controller ||
+        _signatureHelpDiagnosticExecuted) {
+      return;
+    }
+
+    try {
+      final result = await controller.evaluateJavaScript<String>(
+        _signatureHelpDiagnosticScript,
+      );
+
+      if (_disposed || _controller != controller) {
+        return;
+      }
+
+      _signatureHelpDiagnosticExecuted = true;
+
+      await _log('Signature Help diagnóstico: ${result ?? "resultado nulo"}');
+    } catch (error, stackTrace) {
+      await _log(
+        'Signature Help: erro no diagnóstico: '
+        '$error\n$stackTrace',
+      );
+
+      debugPrint(
+        '[EditorMonacoCompletionService] '
+        'Erro no diagnóstico Signature Help: $error',
+      );
+
+      debugPrintStack(stackTrace: stackTrace);
+    }
+  }
+
+  Future<CompletionList> _provideDartCompletions(
+    CompletionRequest request,
+  ) async {
+    if (_disposed) {
+      return const CompletionList(suggestions: []);
+    }
+
+    try {
+      final requestUri = request.uri;
+
+      final line = request.position.lineZeroBased;
+
+      final originalCharacter = request.position.columnZeroBased;
+
+      await _log(
+        '[MONACO] '
+        'uri=${requestUri ?? '-'} '
+        'activeFile=${_activeFilePath ?? '-'} '
+        'line=$line '
+        'column=$originalCharacter '
+        'range=${request.defaultRange}',
+      );
+
+      if (requestUri == null) {
+        await _log('[MONACO] Completion recusado: URI=null.');
+
+        return const CompletionList(suggestions: []);
+      }
+
+      final path = _pathFromMonacoUri(requestUri);
+
+      if (path == null || path.trim().isEmpty) {
+        await _log('[URI] Conversão falhou: $requestUri');
+
+        return const CompletionList(suggestions: []);
+      }
+
+      await _log('[URI] monaco=$requestUri -> path=$path');
+
+      if (!_isDartFile(path)) {
+        await _log('[MONACO] Arquivo não-Dart: $path');
+
+        return const CompletionList(suggestions: []);
+      }
+
+      final currentContent = await _synchronizeCurrentDocument(path);
+
+      if (_disposed) {
+        return const CompletionList(suggestions: []);
+      }
+
+      final normalizedCharacter = _normalizeCompletionCharacterFromText(
+        text: currentContent,
+        line: line,
+        character: originalCharacter,
+      );
+
+      await _log(
+        '[POSITION] '
+        'Monaco=$line:$originalCharacter '
+        '-> LSP=$line:$normalizedCharacter',
+      );
+
+      await _log(
+        '[SYNC] Conteúdo atual sincronizado antes '
+        'do completion. chars=${currentContent.length}',
+      );
+
+      await _log(
+        '[LSP] path=$path '
+        'line=$line '
+        'character=$normalizedCharacter',
+      );
+
+      final dartItems = await analysisCoordinator.complete(
+        path: path,
+        line: line,
+        character: normalizedCharacter,
+      );
+
+      await _log(
+        '[RESULT] line=$line '
+        'character=$normalizedCharacter '
+        'items=${dartItems.length}',
+      );
+
+      if (dartItems.isNotEmpty) {
+        final labels = dartItems.take(8).map((item) => item.label).join(', ');
+
+        await _log('[RESULT] first=$labels');
+      }
+
+      if (_disposed) {
+        return const CompletionList(suggestions: []);
+      }
+
+      final suggestions = dartItems
+          .map((item) => _toMonacoCompletionItem(item, request))
+          .toList();
+
+      return CompletionList(suggestions: suggestions);
+    } catch (error, stackTrace) {
+      await _log('[ERROR] Completion: $error\n$stackTrace');
+
+      debugPrint(
+        '[EditorMonacoCompletionService] '
+        'Erro ao obter completions: $error',
+      );
+
+      debugPrintStack(stackTrace: stackTrace);
+
+      return const CompletionList(suggestions: []);
+    }
+  }
+
+  Future<String> _synchronizeCurrentDocument(String path) async {
+    final controller = _controller;
+
+    if (controller == null) {
+      throw StateError('MonacoController não está disponível.');
+    }
+
+    if (_disposed) {
+      throw StateError('EditorMonacoCompletionService já foi descartado.');
+    }
+
+    await controller.whenReady;
+
+    if (_disposed) {
+      throw StateError('EditorMonacoCompletionService já foi descartado.');
+    }
+
+    final content = await controller.document.getText();
+
+    if (_disposed) {
+      throw StateError('EditorMonacoCompletionService já foi descartado.');
+    }
+
+    await _log(
+      '[SYNC] Enviando conteúdo atual para Analysis Server. '
+      'path=$path chars=${content.length}',
+    );
+
+    await analysisCoordinator.changeDocument(path: path, text: content);
+
+    return content;
+  }
+
+  int _normalizeCompletionCharacterFromText({
+    required String text,
+    required int line,
+    required int character,
+  }) {
+    final lines = text.split('\n');
+
+    if (lines.isEmpty || line < 0) {
+      return 0;
+    }
+
+    final safeLineIndex = line >= lines.length ? lines.length - 1 : line;
+
+    var currentLine = lines[safeLineIndex];
+
+    if (currentLine.endsWith('\r')) {
+      currentLine = currentLine.substring(0, currentLine.length - 1);
+    }
+
+    final lineLength = currentLine.length;
+
+    if (lineLength == 0 || character < 0) {
+      return 0;
+    }
+
+    if (character > lineLength) {
+      return lineLength;
+    }
+
+    return character;
+  }
+
+  Future<int> _normalizeCompletionCharacter({
+    required int line,
+    required int character,
+  }) async {
+    final controller = _controller;
+
+    if (controller == null) {
+      return character < 0 ? 0 : character;
+    }
+
+    try {
+      final text = await controller.document.getText();
+
+      return _normalizeCompletionCharacterFromText(
+        text: text,
+        line: line,
+        character: character,
+      );
+    } catch (error, stackTrace) {
+      await _log(
+        '[POSITION] Não foi possível ler texto do Monaco: '
+        '$error\n$stackTrace',
+      );
+
+      return character < 0 ? 0 : character;
+    }
+  }
+
+  String? _pathFromMonacoUri(Uri uri) {
+    try {
+      final activeFile = _activeFilePath;
+
+      if (uri.scheme == 'inmemory') {
+        if (activeFile == null || activeFile.trim().isEmpty) {
+          return null;
+        }
+
+        return activeFile;
+      }
+
+      if (uri.scheme != 'file') {
+        return null;
+      }
+
+      var path = uri.toFilePath();
+
+      if (path.isEmpty) {
+        return null;
+      }
+
+      if (path.length > 1 && path.endsWith('/')) {
+        path = path.substring(0, path.length - 1);
+      }
+
+      if (activeFile != null && activeFile.trim().isNotEmpty) {
+        final normalizedPath = _normalizePath(path);
+        final normalizedActive = _normalizePath(activeFile);
+
+        if (normalizedPath == normalizedActive) {
+          return activeFile;
+        }
+
+        if (path == '/root' || path.startsWith('/root/')) {
+          return activeFile;
+        }
+      }
+
+      return path;
+    } catch (error, stackTrace) {
+      unawaited(_log('[ERROR] URI $uri -> $error\n$stackTrace'));
+
+      debugPrint(
+        '[EditorMonacoCompletionService] '
+        'Erro convertendo URI para caminho: $uri ->$error',
+      );
+
+      debugPrintStack(stackTrace: stackTrace);
+
+      return null;
+    }
+  }
+
+  String _normalizePath(String path) {
+    var normalized = path.trim();
+
+    while (normalized.contains('//')) {
+      normalized = normalized.replaceAll('//', '/');
+    }
+
+    if (normalized.length > 1 && normalized.endsWith('/')) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+
+    return normalized;
+  }
+
+  bool _isDartFile(String path) {
+    return path.toLowerCase().endsWith('.dart');
+  }
+
+  CompletionItem _toMonacoCompletionItem(
+    DartCompletionItem item,
+    CompletionRequest request,
+  ) {
+    final insertTextRules = item.isSnippet
+        ? <InsertTextRule>{InsertTextRule.insertAsSnippet}
+        : null;
+
+    return CompletionItem(
+      label: item.label,
+      insertText: item.insertText ?? item.label,
+      kind: _mapCompletionKind(item.kind),
+      detail: item.detail,
+      documentation: item.documentation,
+      sortText: _stringValue(item.sortText),
+      filterText: _stringValue(item.filterText),
+      range: request.defaultRange,
+      insertTextRules: insertTextRules,
+    );
+  }
+
+  String? _stringValue(dynamic value) {
+    return value == null ? null : value.toString();
+  }
+
+  CompletionItemKind _mapCompletionKind(int? kind) {
+    switch (kind) {
+      case 1:
+        return CompletionItemKind.text;
+      case 2:
+        return CompletionItemKind.method;
+      case 3:
+        return CompletionItemKind.functionType;
+      case 4:
+        return CompletionItemKind.constructor;
+      case 5:
+        return CompletionItemKind.field;
+      case 6:
+        return CompletionItemKind.variable;
+      case 7:
+        return CompletionItemKind.classType;
+      case 8:
+        return CompletionItemKind.interfaceType;
+      case 9:
+        return CompletionItemKind.module;
+      case 10:
+        return CompletionItemKind.property;
+      case 11:
+        return CompletionItemKind.unit;
+      case 12:
+        return CompletionItemKind.value;
+      case 13:
+        return CompletionItemKind.enumType;
+      case 14:
+        return CompletionItemKind.keyword;
+      case 15:
+        return CompletionItemKind.snippet;
+      case 16:
+        return CompletionItemKind.color;
+      case 17:
+        return CompletionItemKind.file;
+      case 18:
+        return CompletionItemKind.reference;
+      case 19:
+        return CompletionItemKind.folder;
+      case 20:
+        return CompletionItemKind.enumMember;
+      case 21:
+        return CompletionItemKind.constant;
+      case 22:
+        return CompletionItemKind.struct;
+      case 23:
+        return CompletionItemKind.event;
+      case 24:
+        return CompletionItemKind.operatorType;
+      case 25:
+        return CompletionItemKind.typeParameter;
+      default:
+        return CompletionItemKind.text;
+    }
+  }
+
+  Future<void> _log(String message) async {
+    await EditorAutocompleteFileLogger.log('[CompletionService] $message');
+  }
+
+  Future<void> dispose() async {
+    if (_disposed) {
+      return;
+    }
+
+    _disposed = true;
+
+    final controller = _controller;
+    final registration = _registration;
+
+    _registration = null;
+
+    _signatureHelpDiagnosticExecuted = false;
+
+    if (_signatureHelpInstalled && controller != null) {
+      try {
+        await controller.runJavaScript(_signatureHelpDisposeScript);
+        await _log('Provedor de Signature Help removido.');
+      } catch (error) {
+        await _log('ERRO removendo Signature Help: $error');
+      }
+    }
+
+    _signatureHelpInstalled = false;
+
+    if (_ghostTextInstalled && controller != null) {
+      try {
+        await controller.runJavaScript(_ghostTextDisposeScript);
+
+        await _log('Ghost text removido.');
+      } catch (error) {
+        await _log('ERRO removendo ghost text: $error');
+      }
+    }
+
+    _ghostTextInstalled = false;
+
+    _controller = null;
+    _activeFilePath = null;
+
+    if (registration != null) {
+      try {
+        await registration.dispose();
+
+        await _log('CompletionProvider removido durante dispose().');
+      } catch (error) {
+        await _log(
+          'ERRO removendo CompletionProvider durante '
+          'dispose(): $error',
+        );
+      }
+    }
+  }
+}

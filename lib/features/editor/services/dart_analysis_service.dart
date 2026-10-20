@@ -1,0 +1,2311 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+
+import 'dart_lsp_client.dart';
+import 'editor_autocomplete_file_logger.dart';
+
+/// Serviço responsável pela integração do flutteride
+/// com o Dart Analysis Server.
+///
+/// Responsabilidades:
+/// - iniciar/configurar o Analysis Server;
+/// - inicializar o protocolo LSP;
+/// - configurar explicitamente o workspace;
+/// - abrir documentos;
+/// - atualizar documentos;
+/// - fechar documentos;
+/// - solicitar reanálise;
+/// - receber diagnostics;
+/// - solicitar completions / IntelliSense;
+/// - solicitar Signature Help via LSP;
+/// - fornecer diagnostics agrupados por arquivo;
+/// - fornecer logs detalhados.
+///
+/// Não possui nenhuma dependência do Monaco.
+class DartAnalysisService {
+  DartAnalysisService({
+    DartLspClient? client,
+  }) : _client = client ??
+            DartLspClient(
+              enableDebugLogs: true,
+            );
+
+  final DartLspClient _client;
+
+  StreamSubscription<Map<String, dynamic>>?
+      _notificationSubscription;
+
+  final StreamController<DartDiagnostic>
+      _diagnosticsController =
+      StreamController<DartDiagnostic>.broadcast();
+
+  final StreamController<DartFileDiagnostics>
+      _fileDiagnosticsController =
+      StreamController<DartFileDiagnostics>.broadcast();
+
+  bool _initialized = false;
+  bool _disposed = false;
+
+  int _documentVersion = 0;
+
+  final Map<String, int> _documentVersions =
+      <String, int>{};
+
+  final Map<String, String> _documentTexts =
+      <String, String>{};
+
+  final Set<String> _openDocuments =
+      <String>{};
+
+  String? _workspacePath;
+
+  Uri? _workspaceUri;
+
+  Stream<Map<String, dynamic>> get notifications =>
+      _client.notifications;
+
+  Stream<DartDiagnostic> get diagnostics =>
+      _diagnosticsController.stream;
+
+  Stream<DartFileDiagnostics> get fileDiagnostics =>
+      _fileDiagnosticsController.stream;
+
+  Stream<String> get serverLogs =>
+      _client.serverLogs;
+
+  DartLspClient get client =>
+      _client;
+
+  bool get isInitialized =>
+      _initialized &&
+      !_disposed &&
+      _client.isRunning;
+
+  String? get workspacePath =>
+      _workspacePath;
+
+  String? get serverWorkspacePath =>
+      _client.ubuntuWorkingDirectory;
+
+  Set<String> get openDocuments =>
+      Set<String>.unmodifiable(
+        _openDocuments,
+      );
+
+  Future<void> start({
+    required String workspacePath,
+  }) async {
+    if (_disposed) {
+      throw StateError(
+        'DartAnalysisService já foi descartado.',
+      );
+    }
+
+    if (isInitialized) {
+      _log(
+        'Serviço já está inicializado.',
+      );
+      return;
+    }
+
+    final workspace =
+        workspacePath.trim();
+
+    if (workspace.isEmpty) {
+      throw ArgumentError(
+        'workspacePath não pode ser vazio.',
+      );
+    }
+
+    _log(
+      '==================================================',
+    );
+
+    _log(
+      'Iniciando DartAnalysisService...',
+    );
+
+    _log(
+      'workspacePath: $workspace',
+    );
+
+    await _notificationSubscription?.cancel();
+
+    _notificationSubscription =
+        _client.notifications.listen(
+      _handleNotification,
+      onError: (
+        Object error,
+        StackTrace stackTrace,
+      ) {
+        _log(
+          'ERRO no stream de notifications: $error',
+        );
+
+        debugPrint(
+          stackTrace.toString(),
+        );
+      },
+      onDone: () {
+        _log(
+          'Stream de notifications encerrado.',
+        );
+      },
+    );
+
+    await _client.start(
+      projectPath: workspace,
+    );
+
+    _log(
+      'Processo do Analysis Server iniciado.',
+    );
+
+    if (!_client.isRunning) {
+      throw StateError(
+        'O processo do Dart Analysis Server '
+        'foi iniciado, mas não está em execução.',
+      );
+    }
+
+    await _initialize(
+      rootPath: workspace,
+    );
+
+    _log(
+      '==================================================',
+    );
+  }
+
+  Future<void> _initialize({
+    required String rootPath,
+  }) async {
+    if (_disposed) {
+      return;
+    }
+
+    if (!_client.isRunning) {
+      throw StateError(
+        'Analysis Server não está em execução.',
+      );
+    }
+
+    _log(
+      'Preparando workspace...',
+    );
+
+    final directory =
+        Directory(rootPath).absolute;
+
+    _workspacePath =
+        directory.path;
+
+    final serverPath =
+        _client.convertPathToServerPath(
+      directory.path,
+    );
+
+    _workspaceUri =
+        Uri.directory(
+      serverPath,
+    );
+
+    final rootUri =
+        _workspaceUri;
+
+    _log(
+      'Workspace Android:\n'
+      '${directory.path}',
+    );
+
+    _log(
+      'Workspace PRoot:\n'
+      '$serverPath',
+    );
+
+    _log(
+      'Workspace URI LSP:\n'
+      '${rootUri.toString()}',
+    );
+
+    _log(
+      'Workspace existe no processo atual: '
+      '${directory.existsSync()}',
+    );
+
+    _log(
+      'Enviando initialize...',
+    );
+
+    await _client.sendRequest(
+      'initialize',
+      <String, dynamic>{
+        'processId': pid,
+        'rootUri':
+            rootUri.toString(),
+        'clientInfo':
+            <String, dynamic>{
+          'name':
+              'flutteride',
+          'version':
+              '1.0.0',
+        },
+        'capabilities':
+            <String, dynamic>{
+          'workspace':
+              <String, dynamic>{
+            'workspaceFolders':
+                true,
+            'configuration':
+                true,
+          },
+          'textDocument':
+              <String, dynamic>{
+            'synchronization':
+                <String, dynamic>{
+              'dynamicRegistration':
+                  false,
+              'willSave':
+                  false,
+              'willSaveWaitUntil':
+                  false,
+              'didSave':
+                  true,
+            },
+            'completion':
+                <String, dynamic>{
+              'dynamicRegistration':
+                  false,
+              'contextSupport':
+                  true,
+              'completionItem':
+                  <String, dynamic>{
+                'snippetSupport':
+                    true,
+                'documentationFormat':
+                    <String>[
+                  'markdown',
+                  'plaintext',
+                ],
+                'deprecatedSupport':
+                    true,
+                'preselectSupport':
+                    true,
+                'tagSupport':
+                    <String, dynamic>{
+                  'valueSet':
+                      <int>[
+                    1,
+                  ],
+                },
+              },
+            },
+
+            // Capacidades do cliente para Signature Help.
+            'signatureHelp':
+                <String, dynamic>{
+              'dynamicRegistration':
+                  false,
+              'contextSupport':
+                  true,
+              'signatureInformation':
+                  <String, dynamic>{
+                'documentationFormat':
+                    <String>[
+                  'markdown',
+                  'plaintext',
+                ],
+                'parameterInformation':
+                    <String, dynamic>{
+                  'labelOffsetSupport':
+                      true,
+                },
+                'activeParameterSupport':
+                    true,
+              },
+            },
+
+            'hover':
+                <String, dynamic>{
+              'contentFormat':
+                  <String>[
+                'markdown',
+                'plaintext',
+              ],
+            },
+            'definition':
+                <String, dynamic>{},
+            'references':
+                <String, dynamic>{},
+            'publishDiagnostics':
+                <String, dynamic>{},
+          },
+        },
+        'workspaceFolders':
+            <Map<String, dynamic>>[
+          <String, dynamic>{
+            'uri':
+                rootUri.toString(),
+            'name':
+                _workspaceName(
+              serverPath,
+            ),
+          },
+        ],
+      },
+    );
+
+    if (_disposed) {
+      return;
+    }
+
+    _log(
+      'Resposta do initialize recebida.',
+    );
+
+    _log(
+      'initialize concluído.',
+    );
+
+    _log(
+      'Enviando initialized...',
+    );
+
+    _client.sendNotification(
+      'initialized',
+      <String, dynamic>{},
+    );
+
+    _log(
+      'initialized enviado.',
+    );
+
+    _initialized = true;
+
+    await _sendWorkspaceConfiguration();
+
+    _log(
+      'LSP inicializado com sucesso.',
+    );
+
+    _log(
+      'Aguardando notificações do Analysis Server...',
+    );
+  }
+
+  Future<void> _sendWorkspaceConfiguration() async {
+    if (!_initialized ||
+        _disposed) {
+      return;
+    }
+
+    _log(
+      'Enviando workspace/didChangeConfiguration...',
+    );
+
+    final settings =
+        <String, dynamic>{
+      'dart':
+          <String, dynamic>{
+        'analysisServer':
+            <String, dynamic>{
+          'enabled':
+              true,
+        },
+      },
+    };
+
+    _client.sendNotification(
+      'workspace/didChangeConfiguration',
+      <String, dynamic>{
+        'settings':
+            settings,
+      },
+    );
+
+    _log(
+      'workspace/didChangeConfiguration enviado.',
+    );
+  }
+
+  Future<void> openDocument({
+    required String path,
+    required String text,
+    String languageId = 'dart',
+  }) async {
+    _ensureInitialized();
+
+    final normalizedPath =
+        _normalizePath(path);
+
+    final serverPath =
+        _client.convertPathToServerPath(
+      normalizedPath,
+    );
+
+    final uri =
+        Uri.file(serverPath);
+
+    final uriString =
+        uri.toString();
+
+    if (_openDocuments.contains(
+      uriString,
+    )) {
+      _log(
+        'didOpen ignorado: arquivo já está aberto.',
+      );
+
+      await changeDocument(
+        path: normalizedPath,
+        text: text,
+      );
+
+      return;
+    }
+
+    final version =
+        _nextDocumentVersionFor(
+      uriString,
+    );
+
+    _documentTexts[uriString] =
+        text;
+
+    _log(
+      '==================================================',
+    );
+
+    _log(
+      'Enviando didOpen.',
+    );
+
+    _log(
+      'path Android: '
+      '$normalizedPath',
+    );
+
+    _log(
+      'path PRoot: '
+      '$serverPath',
+    );
+
+    _log(
+      'uri: '
+      '$uriString',
+    );
+
+    _log(
+      'languageId: '
+      '$languageId',
+    );
+
+    _log(
+      'version: '
+      '$version',
+    );
+
+    unawaited(
+      EditorAutocompleteFileLogger.textState(
+        source: 'didOpen',
+        path: normalizedPath,
+        version: version,
+        text: text,
+      ),
+    );
+
+    _client.sendNotification(
+      'textDocument/didOpen',
+      <String, dynamic>{
+        'textDocument':
+            <String, dynamic>{
+          'uri':
+              uriString,
+          'languageId':
+              languageId,
+          'version':
+              version,
+          'text':
+              text,
+        },
+      },
+    );
+
+    _openDocuments.add(
+      uriString,
+    );
+
+    _log(
+      'didOpen enviado com sucesso.',
+    );
+
+    _log(
+      'Documentos abertos: '
+      '${_openDocuments.length}',
+    );
+
+    _client.sendNotification(
+      'dart/reanalyze',
+      <String, dynamic>{},
+    );
+
+    _log(
+      'dart/reanalyze enviado após didOpen.',
+    );
+
+    _log(
+      '==================================================',
+    );
+  }
+
+  Future<void> changeDocument({
+    required String path,
+    required String text,
+  }) async {
+    _ensureInitialized();
+
+    final normalizedPath =
+        _normalizePath(path);
+
+    final serverPath =
+        _client.convertPathToServerPath(
+      normalizedPath,
+    );
+
+    final uri =
+        Uri.file(serverPath);
+
+    final uriString =
+        uri.toString();
+
+    if (!_openDocuments.contains(
+      uriString,
+    )) {
+      _log(
+        'changeDocument chamado para arquivo '
+        'que não está aberto.',
+      );
+
+      await openDocument(
+        path: normalizedPath,
+        text: text,
+      );
+
+      return;
+    }
+
+    final version =
+        _nextDocumentVersionFor(
+      uriString,
+    );
+
+    _documentTexts[uriString] =
+        text;
+
+    _log(
+      '==================================================',
+    );
+
+    _log(
+      'didChange.',
+    );
+
+    _log(
+      'path Android: '
+      '$normalizedPath',
+    );
+
+    _log(
+      'path PRoot: '
+      '$serverPath',
+    );
+
+    _log(
+      'uri: '
+      '$uriString',
+    );
+
+    _log(
+      'version: '
+      '$version',
+    );
+
+    unawaited(
+      EditorAutocompleteFileLogger.textState(
+        source: 'didChange',
+        path: normalizedPath,
+        version: version,
+        text: text,
+      ),
+    );
+
+    _client.sendNotification(
+      'textDocument/didChange',
+      <String, dynamic>{
+        'textDocument':
+            <String, dynamic>{
+          'uri':
+              uriString,
+          'version':
+              version,
+        },
+        'contentChanges':
+            <Map<String, dynamic>>[
+          <String, dynamic>{
+            'text':
+                text,
+          },
+        ],
+      },
+    );
+
+    _log(
+      'didChange enviado.',
+    );
+
+    _log(
+      '==================================================',
+    );
+  }
+
+  Future<void> closeDocument(
+    String path,
+  ) async {
+    if (!_initialized ||
+        _disposed) {
+      return;
+    }
+
+    final normalizedPath =
+        _normalizePath(path);
+
+    final serverPath =
+        _client.convertPathToServerPath(
+      normalizedPath,
+    );
+
+    final uri =
+        Uri.file(serverPath);
+
+    final uriString =
+        uri.toString();
+
+    if (!_openDocuments.contains(
+      uriString,
+    )) {
+      return;
+    }
+
+    _log(
+      'didClose: '
+      '$normalizedPath',
+    );
+
+    _client.sendNotification(
+      'textDocument/didClose',
+      <String, dynamic>{
+        'textDocument':
+            <String, dynamic>{
+          'uri':
+              uriString,
+        },
+      },
+    );
+
+    _openDocuments.remove(
+      uriString,
+    );
+
+    _documentVersions.remove(
+      uriString,
+    );
+
+    _documentTexts.remove(
+      uriString,
+    );
+
+    _log(
+      'didClose enviado.',
+    );
+  }
+
+  // ===========================================================================
+  // COMPLETION / INTELLISENSE
+  // ===========================================================================
+
+
+  /// Registra a resposta LSP bruta antes de convertê-la.
+  Future<void> _logCompletionProbeRaw(
+    Map<String, dynamic> response,
+  ) async {
+    final result = response['result'];
+    List<dynamic> items = <dynamic>[];
+
+    if (result is List) {
+      items = result;
+    } else if (result is Map && result['items'] is List) {
+      items = result['items'] as List;
+    }
+
+    await EditorAutocompleteFileLogger.log(
+      '[COMP_PROBE] RAW_RESPONSE '
+      'type=${result.runtimeType} count=${items.length}',
+    );
+
+    for (final value in items) {
+      if (value is! Map) continue;
+
+      final item = Map<String, dynamic>.from(value);
+      final label = item['label']?.toString() ?? '';
+      final detail = item['detail']?.toString() ?? '';
+      final insertText = item['insertText']?.toString() ?? '';
+      final textEdit = item['textEdit'];
+      final newText = textEdit is Map
+          ? textEdit['newText']?.toString() ?? ''
+          : '';
+
+      final relevant = label == 'Text' ||
+          label.contains('Text(') ||
+          detail.contains('Text(') ||
+          insertText.contains('Text(') ||
+          newText.contains('Text(');
+
+      if (!relevant) continue;
+
+      final fields = <String, dynamic>{
+        'label': item['label'],
+        'kind': item['kind'],
+        'detail': item['detail'],
+        'insertText': item['insertText'],
+        'insertTextFormat': item['insertTextFormat'],
+        'filterText': item['filterText'],
+        'sortText': item['sortText'],
+        'textEdit': item['textEdit'],
+        'additionalTextEdits': item['additionalTextEdits'],
+        'commitCharacters': item['commitCharacters'],
+      };
+
+      await EditorAutocompleteFileLogger.log(
+        '[COMP_PROBE] RAW_ITEM ${jsonEncode(fields)}',
+      );
+    }
+  }
+
+  Future<List<DartCompletionItem>> complete({
+    required String path,
+    required int line,
+    required int character,
+  }) async {
+    _ensureInitialized();
+
+    final normalizedPath =
+        _normalizePath(path);
+
+    final serverPath =
+        _client.convertPathToServerPath(
+      normalizedPath,
+    );
+
+    final uri =
+        Uri.file(serverPath);
+
+    final uriString =
+        uri.toString();
+
+    final safeLine =
+        line < 0 ? 0 : line;
+
+    final safeCharacter =
+        character < 0
+            ? 0
+            : character;
+
+    final currentVersion =
+        _documentVersions[uriString];
+
+    final currentText =
+        _documentTexts[uriString];
+
+    final isOpen =
+        _openDocuments.contains(
+      uriString,
+    );
+
+    _log(
+      '==================================================',
+    );
+
+    _log(
+      '[Completion] INÍCIO',
+    );
+
+    unawaited(
+      EditorAutocompleteFileLogger.lspTarget(
+        path: normalizedPath,
+        uri: uriString,
+        line: safeLine,
+        character: safeCharacter,
+        version: currentVersion,
+        isOpen: isOpen,
+        textState:
+            currentText == null
+                ? 'text=-'
+                : 'lines=${_countLines(currentText)} '
+                  'chars=${currentText.length} '
+                  'endsWithNewline='
+                  '${currentText.endsWith('\n')} '
+                  'tail=${_textTail(currentText)}',
+      ),
+    );
+
+    _log(
+      '[Completion] path Android: '
+      '$normalizedPath',
+    );
+
+    _log(
+      '[Completion] path PRoot: '
+      '$serverPath',
+    );
+
+    _log(
+      '[Completion] URI: '
+      '$uriString',
+    );
+
+    _log(
+      '[Completion] posição: '
+      '$safeLine:$safeCharacter',
+    );
+
+    _log(
+      '[Completion] documento aberto: '
+      '$isOpen',
+    );
+
+    _log(
+      '[Completion] versão atual: '
+      '$currentVersion',
+    );
+
+    _log(
+      '[Completion] enviando '
+      'textDocument/completion...',
+    );
+
+    try {
+      final result =
+          await _client.sendRequest(
+        'textDocument/completion',
+        <String, dynamic>{
+          'textDocument':
+              <String, dynamic>{
+            'uri':
+                uriString,
+          },
+          'position':
+              <String, dynamic>{
+            'line':
+                safeLine,
+            'character':
+                safeCharacter,
+          },
+          'context':
+              <String, dynamic>{
+            'triggerKind':
+                1,
+          },
+        },
+      ).timeout(
+        const Duration(
+          seconds: 5,
+        ),
+      );
+
+      // Registra a resposta original, antes da conversão.
+      await _logCompletionProbeRaw(result);
+
+      final completions =
+          _parseCompletionResult(
+        result,
+      );
+
+      // Registra os mesmos campos depois da conversão.
+      for (final item in completions) {
+        final detail = item.detail ?? '';
+        final insertText = item.insertText ?? '';
+
+        if (item.label == 'Text' ||
+            item.label.contains('Text(') ||
+            detail.contains('Text(') ||
+            insertText.contains('Text(')) {
+          final fields = <String, dynamic>{
+            'label': item.label,
+            'kind': item.kind,
+            'detail': item.detail,
+            'insertText': item.insertText,
+            'insertTextFormat': item.insertTextFormat,
+            'isSnippet': item.isSnippet,
+            'textEdit': item.textEdit?.toString(),
+            'commitCharacters': item.commitCharacters,
+          };
+
+          await EditorAutocompleteFileLogger.log(
+            '[COMP_PROBE] PARSED_ITEM ${jsonEncode(fields)}',
+          );
+        }
+      }
+
+      unawaited(
+        EditorAutocompleteFileLogger.completionResult(
+          count: completions.length,
+          line: safeLine,
+          character: safeCharacter,
+        ),
+      );
+
+      _log(
+        '[Completion] resposta recebida.',
+      );
+
+      _log(
+        '[Completion] sugestões interpretadas: '
+        '${completions.length}',
+      );
+
+      if (completions.isNotEmpty) {
+        final labels = completions
+            .take(10)
+            .map(
+              (item) => item.label,
+            )
+            .join(', ');
+
+        _log(
+          '[Completion] primeiras sugestões: '
+          '$labels',
+        );
+      }
+
+      _log(
+        '[Completion] FIM',
+      );
+
+      _log(
+        '==================================================',
+      );
+
+      return completions;
+    } on TimeoutException {
+      _log(
+        '[Completion] TIMEOUT após 5 segundos.',
+      );
+
+      _log(
+        '[Completion] FIM COM TIMEOUT',
+      );
+
+      _log(
+        '==================================================',
+      );
+
+      return const <DartCompletionItem>[];
+    } catch (
+      error,
+      stackTrace
+    ) {
+      _log(
+        '[Completion] ERRO: '
+        '$error',
+      );
+
+      unawaited(
+        EditorAutocompleteFileLogger.error(
+          'DartAnalysisService.complete',
+          error,
+        ),
+      );
+
+      debugPrint(
+        stackTrace.toString(),
+      );
+
+      _log(
+        '[Completion] FIM COM ERRO',
+      );
+
+      _log(
+        '==================================================',
+      );
+
+      return const <DartCompletionItem>[];
+    }
+  }
+
+  // ===========================================================================
+  // SIGNATURE HELP
+  // ===========================================================================
+
+  /// Solicita ao Dart Analysis Server a assinatura da função
+  /// ou do construtor na posição atual do cursor.
+  ///
+  /// [line] e [character] usam posições LSP baseadas em zero.
+  ///
+  /// [triggerCharacter] pode ser '(' ou ','.
+  ///
+  /// Retorna o objeto `result` da resposta LSP ou null
+  /// quando não existe assinatura disponível ou ocorre erro.
+  Future<Map<String, dynamic>?> signatureHelp({
+    required String path,
+    required int line,
+    required int character,
+    String? triggerCharacter,
+    bool isRetrigger = false,
+  }) async {
+    _ensureInitialized();
+
+    final normalizedPath =
+        _normalizePath(path);
+
+    final serverPath =
+        _client.convertPathToServerPath(
+      normalizedPath,
+    );
+
+    final uri =
+        Uri.file(serverPath);
+
+    final uriString =
+        uri.toString();
+
+    final safeLine =
+        line < 0 ? 0 : line;
+
+    final safeCharacter =
+        character < 0 ? 0 : character;
+
+    final isOpen =
+        _openDocuments.contains(
+      uriString,
+    );
+
+    _log(
+      '[SignatureHelp] INÍCIO',
+    );
+
+    _log(
+      '[SignatureHelp] URI: $uriString',
+    );
+
+    _log(
+      '[SignatureHelp] posição: '
+      '$safeLine:$safeCharacter',
+    );
+
+    _log(
+      '[SignatureHelp] documento aberto: $isOpen',
+    );
+
+    _log(
+      '[SignatureHelp] triggerCharacter: '
+      '$triggerCharacter',
+    );
+
+    try {
+      final triggerKind =
+          triggerCharacter == '(' ||
+                  triggerCharacter == ','
+              ? 2
+              : 1;
+
+      final context =
+          <String, dynamic>{
+        'triggerKind': triggerKind,
+        'isRetrigger': isRetrigger,
+      };
+
+      if (triggerCharacter != null &&
+          triggerCharacter.isNotEmpty) {
+        context['triggerCharacter'] =
+            triggerCharacter;
+      }
+
+      final response =
+          await _client.sendRequest(
+        'textDocument/signatureHelp',
+        <String, dynamic>{
+          'textDocument':
+              <String, dynamic>{
+            'uri': uriString,
+          },
+          'position':
+              <String, dynamic>{
+            'line': safeLine,
+            'character': safeCharacter,
+          },
+          'context': context,
+        },
+      ).timeout(
+        const Duration(seconds: 5),
+      );
+
+      final rawResult =
+          response['result'];
+
+      if (rawResult is Map) {
+        final result =
+            Map<String, dynamic>.from(
+          rawResult,
+        );
+
+        _log(
+          '[SignatureHelp] Assinaturas recebidas: '
+          '${result['signatures'] is List ? (result['signatures'] as List).length : 0}',
+        );
+
+        _log(
+          '[SignatureHelp] FIM',
+        );
+
+        return result;
+      }
+
+      _log(
+        '[SignatureHelp] Nenhuma assinatura disponível.',
+      );
+
+      return null;
+    } on TimeoutException {
+      _log(
+        '[SignatureHelp] TIMEOUT após 5 segundos.',
+      );
+
+      return null;
+    } catch (
+      error,
+      stackTrace
+    ) {
+      _log(
+        '[SignatureHelp] ERRO: $error',
+      );
+
+      unawaited(
+        EditorAutocompleteFileLogger.error(
+          'DartAnalysisService.signatureHelp',
+          error,
+        ),
+      );
+
+      debugPrint(
+        stackTrace.toString(),
+      );
+
+      return null;
+    } finally {
+      _log(
+        '[SignatureHelp] FIM DA SOLICITAÇÃO',
+      );
+    }
+  }
+
+  List<DartCompletionItem>
+      _parseCompletionResult(
+    Map<String, dynamic> response,
+  ) {
+    final rawResult =
+        response['result'];
+
+    if (rawResult == null) {
+      _log(
+        '[Completion] result é null.',
+      );
+
+      return const <DartCompletionItem>[];
+    }
+
+    List<dynamic> rawItems;
+
+    if (rawResult is List) {
+      rawItems = rawResult;
+    } else if (rawResult is Map) {
+      final items =
+          rawResult['items'];
+
+      if (items is! List) {
+        _log(
+          '[Completion] result é Map, '
+          'mas "items" não é List.',
+        );
+
+        return const <DartCompletionItem>[];
+      }
+
+      rawItems = items;
+    } else {
+      _log(
+        '[Completion] formato de result inesperado: '
+        '${rawResult.runtimeType}',
+      );
+
+      return const <DartCompletionItem>[];
+    }
+
+    final completions =
+        <DartCompletionItem>[];
+
+    for (final item in rawItems) {
+      if (item is! Map) {
+        continue;
+      }
+
+      try {
+        final completion =
+            DartCompletionItem.fromLsp(
+          Map<String, dynamic>.from(
+            item,
+          ),
+        );
+
+        if (completion.label.isNotEmpty) {
+          completions.add(
+            completion,
+          );
+        }
+      } catch (
+        error,
+        stackTrace
+      ) {
+        _log(
+          '[Completion] ERRO interpretando item: '
+          '$error',
+        );
+
+        debugPrint(
+          stackTrace.toString(),
+        );
+      }
+    }
+
+    return List<DartCompletionItem>.unmodifiable(
+      completions,
+    );
+  }
+
+  Future<void> reanalyze() async {
+    _ensureInitialized();
+
+    _log(
+      'Solicitando reanálise...',
+    );
+
+    _client.sendNotification(
+      'dart/reanalyze',
+      <String, dynamic>{},
+    );
+  }
+
+  void _handleNotification(
+    Map<String, dynamic> message,
+  ) {
+    if (_disposed) {
+      return;
+    }
+
+    final method =
+        message['method'];
+
+    if (method is! String) {
+      return;
+    }
+
+    final params =
+        message['params'];
+
+    switch (method) {
+      case 'textDocument/publishDiagnostics':
+        _handlePublishDiagnostics(
+          message,
+        );
+        break;
+
+      case 'window/logMessage':
+        _handleWindowLogMessage(
+          message,
+        );
+        break;
+
+      case 'window/showMessage':
+        _log(
+          'window/showMessage: $params',
+        );
+        break;
+
+      case 'telemetry/event':
+        _log(
+          'telemetry/event: $params',
+        );
+        break;
+    }
+  }
+
+  void _handleWindowLogMessage(
+    Map<String, dynamic> message,
+  ) {
+    final params =
+        message['params'];
+
+    if (params is! Map) {
+      return;
+    }
+
+    _log(
+      'SERVER LOG [${params['type']}]: '
+      '${params['message']}',
+    );
+  }
+
+  void _handlePublishDiagnostics(
+    Map<String, dynamic> message,
+  ) {
+    final params =
+        message['params'];
+
+    if (params is! Map) {
+      return;
+    }
+
+    final uri =
+        params['uri'];
+
+    final diagnosticsValue =
+        params['diagnostics'];
+
+    if (uri is! String ||
+        diagnosticsValue is! List) {
+      return;
+    }
+
+    final diagnostics =
+        <DartDiagnostic>[];
+
+    for (final item in diagnosticsValue) {
+      if (item is! Map) {
+        continue;
+      }
+
+      try {
+        final diagnostic =
+            DartDiagnostic.fromLsp(
+          uri: uri,
+          data:
+              Map<String, dynamic>.from(
+            item,
+          ),
+        );
+
+        diagnostics.add(
+          diagnostic,
+        );
+
+        if (!_diagnosticsController
+            .isClosed) {
+          _diagnosticsController.add(
+            diagnostic,
+          );
+        }
+      } catch (
+        error,
+        stackTrace
+      ) {
+        _log(
+          'ERRO ao interpretar diagnostic: '
+          '$error',
+        );
+
+        debugPrint(
+          stackTrace.toString(),
+        );
+      }
+    }
+
+    if (!_fileDiagnosticsController
+        .isClosed) {
+      _fileDiagnosticsController.add(
+        DartFileDiagnostics(
+          uri: uri,
+          diagnostics:
+              List<DartDiagnostic>.unmodifiable(
+            diagnostics,
+          ),
+        ),
+      );
+    }
+
+    _log(
+      'publishDiagnostics: '
+      '$uri '
+      '(${diagnostics.length})',
+    );
+  }
+
+  void _log(
+    String message,
+  ) {
+    debugPrint(
+      '[DartAnalysisService] $message',
+    );
+
+    unawaited(
+      EditorAutocompleteFileLogger.log(
+        '[DartAnalysisService] $message',
+      ),
+    );
+  }
+
+  int _countLines(
+    String text,
+  ) {
+    if (text.isEmpty) {
+      return 1;
+    }
+
+    var lines = 1;
+
+    for (
+      var i = 0;
+      i < text.length;
+      i++
+    ) {
+      if (text.codeUnitAt(i) == 10) {
+        lines++;
+      }
+    }
+
+    return lines;
+  }
+
+  String _textTail(
+    String text,
+  ) {
+    if (text.isEmpty) {
+      return '""';
+    }
+
+    const maxLength = 30;
+
+    final start =
+        text.length > maxLength
+            ? text.length - maxLength
+            : 0;
+
+    return '"${text
+        .substring(start)
+        .replaceAll(
+          '\\',
+          r'\\',
+        )
+        .replaceAll(
+          '\n',
+          r'\n',
+        )
+        .replaceAll(
+          '\r',
+          r'\r',
+        )
+        .replaceAll(
+          '\t',
+          r'\t',
+        )}"';
+  }
+
+  void _ensureInitialized() {
+    if (_disposed) {
+      throw StateError(
+        'DartAnalysisService já foi descartado.',
+      );
+    }
+
+    if (!_initialized ||
+        !_client.isRunning) {
+      throw StateError(
+        'Dart Analysis Server não foi inicializado.',
+      );
+    }
+  }
+
+  int _nextDocumentVersion() {
+    _documentVersion++;
+    return _documentVersion;
+  }
+
+  int _nextDocumentVersionFor(
+    String uri,
+  ) {
+    final current =
+        _documentVersions[uri];
+
+    if (current == null) {
+      final version =
+          _nextDocumentVersion();
+
+      _documentVersions[uri] =
+          version;
+
+      return version;
+    }
+
+    final version =
+        current + 1;
+
+    _documentVersions[uri] =
+        version;
+
+    return version;
+  }
+
+  String _normalizePath(
+    String path,
+  ) {
+    return File(
+      path,
+    ).absolute.path;
+  }
+
+  String _workspaceName(
+    String path,
+  ) {
+    final normalized =
+        path.replaceAll(
+      '\\',
+      '/',
+    );
+
+    final parts =
+        normalized.split('/');
+
+    for (
+      var i = parts.length - 1;
+      i >= 0;
+      i--
+    ) {
+      if (parts[i].isNotEmpty) {
+        return parts[i];
+      }
+    }
+
+    return 'workspace';
+  }
+
+  Future<void> stop() async {
+    if (_disposed) {
+      return;
+    }
+
+    _log(
+      'Parando serviço...',
+    );
+
+    if (_initialized &&
+        _client.isRunning) {
+      final documents =
+          List<String>.from(
+        _openDocuments,
+      );
+
+      for (final uri in documents) {
+        try {
+          _client.sendNotification(
+            'textDocument/didClose',
+            <String, dynamic>{
+              'textDocument':
+                  <String, dynamic>{
+                'uri':
+                    uri,
+              },
+            },
+          );
+        } catch (error) {
+          _log(
+            'Erro ao fechar documento '
+            '$uri: $error',
+          );
+        }
+      }
+    }
+
+    _openDocuments.clear();
+    _documentVersions.clear();
+    _documentTexts.clear();
+
+    await _notificationSubscription
+        ?.cancel();
+
+    _notificationSubscription = null;
+
+    _initialized = false;
+
+    await _client.stop();
+
+    _log(
+      'Serviço parado.',
+    );
+  }
+
+  Future<void> dispose() async {
+    if (_disposed) {
+      return;
+    }
+
+    _disposed = true;
+    _initialized = false;
+
+    _openDocuments.clear();
+    _documentVersions.clear();
+    _documentTexts.clear();
+
+    await _notificationSubscription
+        ?.cancel();
+
+    _notificationSubscription = null;
+
+    await _client.dispose();
+
+    if (!_diagnosticsController.isClosed) {
+      await _diagnosticsController.close();
+    }
+
+    if (!_fileDiagnosticsController.isClosed) {
+      await _fileDiagnosticsController.close();
+    }
+
+    debugPrint(
+      '[DartAnalysisService] Serviço descartado.',
+    );
+
+    unawaited(
+      EditorAutocompleteFileLogger.log(
+        '[DartAnalysisService] Serviço descartado.',
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// DART COMPLETION ITEM
+// =============================================================================
+
+class DartCompletionItem {
+  final String label;
+  final int kind;
+  final String? detail;
+  final String? documentation;
+  final String? insertText;
+  final int insertTextFormat;
+  final String? sortText;
+  final String? filterText;
+  final bool deprecated;
+  final bool preselect;
+  final List<String> commitCharacters;
+  final DartCompletionTextEdit? textEdit;
+  final List<DartCompletionTextEdit>
+      additionalTextEdits;
+
+  const DartCompletionItem({
+    required this.label,
+    required this.kind,
+    this.detail,
+    this.documentation,
+    this.insertText,
+    this.insertTextFormat = 1,
+    this.sortText,
+    this.filterText,
+    this.deprecated = false,
+    this.preselect = false,
+    this.commitCharacters =
+        const <String>[],
+    this.textEdit,
+    this.additionalTextEdits =
+        const <DartCompletionTextEdit>[],
+  });
+
+  bool get isSnippet =>
+      insertTextFormat == 2;
+
+  factory DartCompletionItem.fromLsp(
+    Map<String, dynamic> data,
+  ) {
+    final documentation =
+        _completionDocumentation(
+      data['documentation'],
+    );
+
+    final tags =
+        data['tags'];
+
+    final deprecatedByTag =
+        tags is List &&
+        tags.any(
+          (tag) =>
+              _toInt(tag) == 1,
+        );
+
+    final textEdit =
+        _completionTextEdit(
+      data['textEdit'],
+    );
+
+    final additionalTextEdits =
+        _completionAdditionalTextEdits(
+      data['additionalTextEdits'],
+    );
+
+    final insertText =
+        _completionInsertText(
+      data,
+    );
+
+    final explicitInsertTextFormat =
+        _toInt(
+      data['insertTextFormat'],
+      fallback: 0,
+    );
+
+    final insertTextFormat =
+        explicitInsertTextFormat != 0
+            ? explicitInsertTextFormat
+            : _inferCompletionInsertTextFormat(
+                insertText,
+              );
+
+    return DartCompletionItem(
+      label:
+          data['label']?.toString() ??
+              '',
+      kind:
+          _toInt(
+        data['kind'],
+        fallback: 1,
+      ),
+      detail:
+          data['detail']?.toString(),
+      documentation:
+          documentation,
+      insertText:
+          insertText,
+      insertTextFormat:
+          insertTextFormat,
+      sortText:
+          data['sortText']?.toString(),
+      filterText:
+          data['filterText']?.toString(),
+      deprecated:
+          data['deprecated'] == true ||
+          deprecatedByTag,
+      preselect:
+          data['preselect'] == true,
+      commitCharacters:
+          _completionCommitCharacters(
+        data['commitCharacters'],
+      ),
+      textEdit:
+          textEdit,
+      additionalTextEdits:
+          additionalTextEdits,
+    );
+  }
+
+  @override
+  String toString() {
+    return 'DartCompletionItem('
+        'label: $label, '
+        'kind: $kind, '
+        'detail: $detail, '
+        'insertText: $insertText, '
+        'insertTextFormat: $insertTextFormat, '
+        'isSnippet: $isSnippet'
+        ')';
+  }
+}
+
+class DartCompletionTextEdit {
+  final DartCompletionRange range;
+  final String newText;
+
+  const DartCompletionTextEdit({
+    required this.range,
+    required this.newText,
+  });
+
+  factory DartCompletionTextEdit.fromLsp(
+    Map<String, dynamic> data,
+  ) {
+    final rangeValue =
+        data['range'];
+
+    if (rangeValue is! Map) {
+      throw const FormatException(
+        'Completion textEdit sem range.',
+      );
+    }
+
+    return DartCompletionTextEdit(
+      range:
+          DartCompletionRange.fromLsp(
+        Map<String, dynamic>.from(
+          rangeValue,
+        ),
+      ),
+      newText:
+          data['newText']?.toString() ??
+              '',
+    );
+  }
+}
+
+class DartCompletionRange {
+  final DartCompletionPosition start;
+  final DartCompletionPosition end;
+
+  const DartCompletionRange({
+    required this.start,
+    required this.end,
+  });
+
+  factory DartCompletionRange.fromLsp(
+    Map<String, dynamic> data,
+  ) {
+    final startValue =
+        data['start'];
+
+    final endValue =
+        data['end'];
+
+    if (startValue is! Map ||
+        endValue is! Map) {
+      throw const FormatException(
+        'Completion range inválido.',
+      );
+    }
+
+    return DartCompletionRange(
+      start:
+          DartCompletionPosition.fromLsp(
+        Map<String, dynamic>.from(
+          startValue,
+        ),
+      ),
+      end:
+          DartCompletionPosition.fromLsp(
+        Map<String, dynamic>.from(
+          endValue,
+        ),
+      ),
+    );
+  }
+
+  @override
+  String toString() {
+    return 'DartCompletionRange('
+        'start: $start, '
+        'end: $end'
+        ')';
+  }
+}
+
+class DartCompletionPosition {
+  final int line;
+  final int character;
+
+  const DartCompletionPosition({
+    required this.line,
+    required this.character,
+  });
+
+  factory DartCompletionPosition.fromLsp(
+    Map<String, dynamic> data,
+  ) {
+    return DartCompletionPosition(
+      line:
+          _toInt(data['line']),
+      character:
+          _toInt(data['character']),
+    );
+  }
+
+  @override
+  String toString() {
+    return 'DartCompletionPosition('
+        'line: $line, '
+        'character: $character'
+        ')';
+  }
+}
+
+String? _completionInsertText(
+  Map<String, dynamic> data,
+) {
+  final insertText =
+      data['insertText'];
+
+  if (insertText is String) {
+    return insertText;
+  }
+
+  final textEdit =
+      data['textEdit'];
+
+  if (textEdit is Map) {
+    final newText =
+        textEdit['newText'];
+
+    if (newText is String) {
+      return newText;
+    }
+  }
+
+  return null;
+}
+
+int _inferCompletionInsertTextFormat(
+  String? insertText,
+) {
+  if (insertText == null ||
+      insertText.isEmpty) {
+    return 1;
+  }
+
+  return _looksLikeLspSnippet(
+    insertText,
+  )
+      ? 2
+      : 1;
+}
+
+bool _looksLikeLspSnippet(
+  String text,
+) {
+  final indexedPlaceholder =
+      RegExp(
+    r'\$\{(?:\d+)(?::[^}]*)?\}',
+  );
+
+  if (indexedPlaceholder.hasMatch(
+    text,
+  )) {
+    return true;
+  }
+
+  final simplePlaceholder =
+      RegExp(
+    r'\$\d+',
+  );
+
+  return simplePlaceholder.hasMatch(
+    text,
+  );
+}
+
+DartCompletionTextEdit? _completionTextEdit(
+  dynamic value,
+) {
+  if (value is! Map) {
+    return null;
+  }
+
+  try {
+    return DartCompletionTextEdit.fromLsp(
+      Map<String, dynamic>.from(
+        value,
+      ),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+List<DartCompletionTextEdit>
+    _completionAdditionalTextEdits(
+  dynamic value,
+) {
+  if (value is! List) {
+    return const <DartCompletionTextEdit>[];
+  }
+
+  final edits =
+      <DartCompletionTextEdit>[];
+
+  for (final item in value) {
+    if (item is! Map) {
+      continue;
+    }
+
+    try {
+      edits.add(
+        DartCompletionTextEdit.fromLsp(
+          Map<String, dynamic>.from(
+            item,
+          ),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  return List<DartCompletionTextEdit>.unmodifiable(
+    edits,
+  );
+}
+
+String? _completionDocumentation(
+  dynamic value,
+) {
+  if (value == null) {
+    return null;
+  }
+
+  if (value is String) {
+    return value;
+  }
+
+  if (value is Map) {
+    final text =
+        value['value'];
+
+    if (text is String) {
+      return text;
+    }
+  }
+
+  return value.toString();
+}
+
+List<String> _completionCommitCharacters(
+  dynamic value,
+) {
+  if (value is! List) {
+    return const <String>[];
+  }
+
+  return List<String>.unmodifiable(
+    value.whereType<String>(),
+  );
+}
+
+// =============================================================================
+// DIAGNOSTICS
+// =============================================================================
+
+class DartFileDiagnostics {
+  final String uri;
+  final List<DartDiagnostic> diagnostics;
+
+  const DartFileDiagnostics({
+    required this.uri,
+    required this.diagnostics,
+  });
+
+  @override
+  String toString() {
+    return 'DartFileDiagnostics('
+        'uri: $uri, '
+        'diagnostics: ${diagnostics.length}'
+        ')';
+  }
+}
+
+class DartDiagnostic {
+  final String uri;
+  final DartDiagnosticRange range;
+  final DartDiagnosticSeverity severity;
+  final String message;
+  final String? source;
+  final String? code;
+  final dynamic data;
+
+  const DartDiagnostic({
+    required this.uri,
+    required this.range,
+    required this.severity,
+    required this.message,
+    this.source,
+    this.code,
+    this.data,
+  });
+
+  factory DartDiagnostic.fromLsp({
+    required String uri,
+    required Map<String, dynamic> data,
+  }) {
+    final rangeValue =
+        data['range'];
+
+    if (rangeValue is! Map) {
+      throw const FormatException(
+        'Diagnostic sem range.',
+      );
+    }
+
+    return DartDiagnostic(
+      uri: uri,
+      range:
+          DartDiagnosticRange.fromLsp(
+        Map<String, dynamic>.from(
+          rangeValue,
+        ),
+      ),
+      severity:
+          DartDiagnosticSeverity.fromLsp(
+        data['severity'],
+      ),
+      message:
+          data['message']?.toString() ??
+              'Erro desconhecido.',
+      source:
+          data['source']?.toString(),
+      code:
+          data['code']?.toString(),
+      data:
+          data['data'],
+    );
+  }
+
+  @override
+  String toString() {
+    return 'DartDiagnostic('
+        'uri: $uri, '
+        'range: $range, '
+        'severity: $severity, '
+        'message: $message, '
+        'source: $source, '
+        'code: $code'
+        ')';
+  }
+}
+
+class DartDiagnosticRange {
+  final DartDiagnosticPosition start;
+  final DartDiagnosticPosition end;
+
+  const DartDiagnosticRange({
+    required this.start,
+    required this.end,
+  });
+
+  factory DartDiagnosticRange.fromLsp(
+    Map<String, dynamic> data,
+  ) {
+    final startValue =
+        data['start'];
+
+    final endValue =
+        data['end'];
+
+    if (startValue is! Map ||
+        endValue is! Map) {
+      throw const FormatException(
+        'Range de diagnóstico inválido.',
+      );
+    }
+
+    return DartDiagnosticRange(
+      start:
+          DartDiagnosticPosition.fromLsp(
+        Map<String, dynamic>.from(
+          startValue,
+        ),
+      ),
+      end:
+          DartDiagnosticPosition.fromLsp(
+        Map<String, dynamic>.from(
+          endValue,
+        ),
+      ),
+    );
+  }
+
+  @override
+  String toString() {
+    return 'DartDiagnosticRange('
+        'start: $start, '
+        'end: $end'
+        ')';
+  }
+}
+
+class DartDiagnosticPosition {
+  final int line;
+  final int character;
+
+  const DartDiagnosticPosition({
+    required this.line,
+    required this.character,
+  });
+
+  factory DartDiagnosticPosition.fromLsp(
+    Map<String, dynamic> data,
+  ) {
+    return DartDiagnosticPosition(
+      line:
+          _toInt(data['line']),
+      character:
+          _toInt(data['character']),
+    );
+  }
+
+  @override
+  String toString() {
+    return 'DartDiagnosticPosition('
+        'line: $line, '
+        'character: $character'
+        ')';
+  }
+}
+
+enum DartDiagnosticSeverity {
+  error,
+  warning,
+  information,
+  hint,
+  unknown;
+
+  static DartDiagnosticSeverity fromLsp(
+    dynamic value,
+  ) {
+    switch (_toInt(value)) {
+      case 1:
+        return DartDiagnosticSeverity.error;
+
+      case 2:
+        return DartDiagnosticSeverity.warning;
+
+      case 3:
+        return DartDiagnosticSeverity.information;
+
+      case 4:
+        return DartDiagnosticSeverity.hint;
+
+      default:
+        return DartDiagnosticSeverity.unknown;
+    }
+  }
+}
+
+int _toInt(
+  dynamic value, {
+  int fallback = 0,
+}) {
+  if (value is int) {
+    return value;
+  }
+
+  if (value is num) {
+    return value.toInt();
+  }
+
+  return int.tryParse(
+        value?.toString() ?? '',
+      ) ??
+      fallback;
+}

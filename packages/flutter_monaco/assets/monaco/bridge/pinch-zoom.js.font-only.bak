@@ -1,0 +1,101 @@
+(function () {
+  'use strict';
+
+  window.__FMB = window.__FMB || {};
+
+  window.__FMB.pinchZoom = function (ctx) {
+    var editor = ctx && typeof ctx.E === 'function'
+      ? ctx.E()
+      : window.editor;
+
+    if (!editor || typeof editor.getDomNode !== 'function') return;
+
+    var node = editor.getDomNode();
+    if (!node || node.__flutteridePinchZoomBound) return;
+
+    node.__flutteridePinchZoomBound = true;
+
+    var minFontSize = 10;
+    var maxFontSize = 36;
+    var startDistance = 0;
+    var startFontSize = 14;
+    var lastFontSize = 14;
+    var active = false;
+
+    function distance(touches) {
+      var dx = touches[0].clientX - touches[1].clientX;
+      var dy = touches[0].clientY - touches[1].clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function currentFontSize() {
+      try {
+        if (window.monaco && window.monaco.editor &&
+            window.monaco.editor.EditorOption) {
+          return editor.getOption(
+            window.monaco.editor.EditorOption.fontSize
+          );
+        }
+      } catch (_) {}
+
+      try {
+        var options = editor.getRawOptions();
+        if (options && typeof options.fontSize === 'number') {
+          return options.fontSize;
+        }
+      } catch (_) {}
+
+      return 14;
+    }
+
+    function onTouchStart(event) {
+      if (!event.touches || event.touches.length !== 2) {
+        active = false;
+        return;
+      }
+
+      startDistance = distance(event.touches);
+      startFontSize = currentFontSize();
+      lastFontSize = startFontSize;
+      active = startDistance > 0;
+
+      if (active && event.cancelable) {
+        event.preventDefault();
+      }
+    }
+
+    function onTouchMove(event) {
+      if (!active || !event.touches || event.touches.length !== 2) {
+        return;
+      }
+
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+
+      var ratio = distance(event.touches) / startDistance;
+      var nextFontSize = Math.round(startFontSize * ratio);
+
+      nextFontSize = Math.max(
+        minFontSize,
+        Math.min(maxFontSize, nextFontSize)
+      );
+
+      if (nextFontSize === lastFontSize) return;
+
+      lastFontSize = nextFontSize;
+      editor.updateOptions({ fontSize: nextFontSize });
+    }
+
+    function onTouchEnd(event) {
+      if (!event.touches || event.touches.length < 2) {
+        active = false;
+      }
+    }
+
+    node.addEventListener('touchstart', onTouchStart, { passive: false });
+    node.addEventListener('touchmove', onTouchMove, { passive: false });
+    node.addEventListener('touchend', onTouchEnd, { passive: true });
+    node.addEventListener('touchcancel', onTouchEnd, { passive: true });
+  };
+})();

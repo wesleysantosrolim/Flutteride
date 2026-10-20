@@ -1,0 +1,38 @@
+name: flutter_monaco_example
+description: Example app for the flutter_monaco package
+publish_to: "none"
+version: 1.0.0
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_monaco:
+    path: ../
+  flutter_svg: ^2.3.0
+  http: ^1.6.0
+  material_ui: ^1.6.0
+  package_info_plus: ^10.2.2
+  url_launcher: ^6.3.3
+  yaml: ^3.1.4
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  platform: ^3.2.0
+
+flutter:
+  uses-material-design: true
+
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Variable.ttf
+    - family: JetBrains Mono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Variable.ttf

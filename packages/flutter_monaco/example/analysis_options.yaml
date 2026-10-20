@@ -1,0 +1,26 @@
+# example/analysis_options.yaml - relaxed override for the package's example
+# app. Examples are documentation: they print, they skip API docs, and they
+# keep their own app structure. It inherits the package's root rules, so a
+# rule disabled here is either documentation-only or app-only.
+
+include: ../analysis_options.yaml
+
+analyzer:
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+
+linter:
+  rules:
+    public_member_api_docs: false
+    comment_references: false
+    avoid_print: false
+    prefer_asserts_with_message: false
+    diagnostic_describe_all_properties: false
+    # why: an app imports its own files relatively; package-import hygiene
+    # matters for the published library, not for the example.
+    always_use_package_imports: false

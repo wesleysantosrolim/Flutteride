@@ -1,0 +1,251 @@
+import 'dart:convert';
+import 'dart:async';
+import 'dart:io';
+
+class EditorAutocompleteFileLogger {
+  EditorAutocompleteFileLogger._();
+
+  static final File _logFile = File(
+    '/storage/emulated/0/Download/FlutterIDE/logs/flutteride_autocomplete.log',
+  );
+
+  static const int _maxFileBytes = 256 * 1024;
+  static const int _maxMessageCharacters = 2500;
+
+  static Future<void>? _logQueue;
+  static bool _initialized = false;
+
+  /// Prefixos de mensagens permitidos no arquivo de diagnóstico.
+  static const List<String> _allowedPrefixes = <String>['[COMP_PROBE]'];
+
+  /// Grava uma mensagem no arquivo compartilhado.
+  ///
+  /// As gravações são serializadas para evitar que mensagens
+  /// simultâneas sobrescrevam ou misturem os registros.
+  static Future<void> log(String message) {
+    if (!_isAllowedMessage(message)) {
+      return Future<void>.value();
+    }
+
+    final previous = _logQueue ?? Future<void>.value();
+
+    final next = previous.then((_) async {
+      try {
+        final directory = _logFile.parent;
+
+        if (!await directory.exists()) {
+          await directory.create(recursive: true);
+        }
+
+        if (!_initialized) {
+          if (!await _logFile.exists()) {
+            await _logFile.create(recursive: true);
+          }
+
+          _initialized = true;
+        }
+
+        final timestamp = DateTime.now().toIso8601String();
+
+        var safeMessage = message;
+
+        if (safeMessage.length > _maxMessageCharacters) {
+          safeMessage =
+              '${safeMessage.substring(0, _maxMessageCharacters)}'
+              ' ...[TRUNCATED]';
+        }
+
+        final line = '[$timestamp] $safeMessage\n';
+
+        final currentLength = await _logFile.length();
+
+        // Usa UTF-8 para calcular o tamanho real dos dados gravados.
+        final additionalBytes = utf8.encode(line).length;
+
+        if (currentLength + additionalBytes > _maxFileBytes) {
+          await _logFile.writeAsString(
+            '[$timestamp] '
+            '[LOGGER] Limite de $_maxFileBytes bytes atingido. '
+            'Log reiniciado.\n',
+            mode: FileMode.write,
+            flush: true,
+          );
+        }
+
+        await _logFile.writeAsString(
+          line,
+          mode: FileMode.append,
+          flush: true,
+        );
+      } catch (error) {
+        // Não deixa um erro de escrita interromper a fila.
+        // O logger não tenta registrar este erro pelo próprio log,
+        // evitando uma possível recursão.
+      }
+    });
+
+    _logQueue = next;
+
+    return next;
+  }
+
+  static bool _isAllowedMessage(String message) {
+    return _allowedPrefixes.any(
+      (prefix) => message.startsWith(prefix),
+    );
+  }
+
+  /// Limpa o arquivo de log.
+  static Future<void> clear() async {
+    final previous = _logQueue ?? Future<void>.value();
+
+    final next = previous.then((_) async {
+      try {
+        final directory = _logFile.parent;
+
+        if (!await directory.exists()) {
+          await directory.create(recursive: true);
+        }
+
+        await _logFile.writeAsString(
+          '',
+          mode: FileMode.write,
+          flush: true,
+        );
+
+        _initialized = true;
+      } catch (_) {
+        // Mantém o comportamento de não propagar erros de escrita.
+      }
+    });
+
+    _logQueue = next;
+
+    await next;
+  }
+
+  /// Registra o estado resumido de um texto enviado
+  /// ao Analysis Server.
+  ///
+  /// Não grava o conteúdo completo.
+  static Future<void> textState({
+    required String source,
+    required String path,
+    required int version,
+    required String text,
+  }) {
+    return log(
+      '[TEXT] '
+      'source=$source '
+      'version=$version '
+      'lines=${_lineCount(text)} '
+      'chars=${text.length} '
+      'endsWithNewline=${text.endsWith('\n')} '
+      'tail=${_tail(text)} '
+      'path=$path',
+    );
+  }
+
+  /// Registra a posição recebida pelo Monaco.
+  static Future<void> monacoPosition({
+    required Uri? uri,
+    required String? activeFile,
+    required int line,
+    required int column,
+    required String defaultRange,
+  }) {
+    return log(
+      '[MONACO] '
+      'uri=${uri ?? '-'} '
+      'activeFile=${activeFile ?? '-'} '
+      'line=$line '
+      'column=$column '
+      'range=$defaultRange',
+    );
+  }
+
+  /// Registra o alvo que será enviado ao LSP.
+  static Future<void> lspTarget({
+    required String path,
+    required String uri,
+    required int line,
+    required int character,
+    required int? version,
+    required bool isOpen,
+    required String textState,
+  }) {
+    return log(
+      '[LSP] '
+      'uri=$uri '
+      'path=$path '
+      'line=$line '
+      'character=$character '
+      'version=${version ?? '-'} '
+      'open=$isOpen '
+      'state=$textState',
+    );
+  }
+
+  /// Registra somente o resultado resumido da completion.
+  static Future<void> completionResult({
+    required int count,
+    required int line,
+    required int character,
+  }) {
+    return log(
+      '[RESULT] '
+      'line=$line '
+      'character=$character '
+      'items=$count',
+    );
+  }
+
+  /// Registra erros de outros serviços.
+  static Future<void> error(
+    String source,
+    Object error,
+  ) {
+    return log(
+      '[ERROR] '
+      '$source: $error',
+    );
+  }
+
+  static int _lineCount(String text) {
+    if (text.isEmpty) {
+      return 1;
+    }
+
+    var count = 1;
+
+    for (var i = 0; i < text.length; i++) {
+      if (text.codeUnitAt(i) == 10) {
+        count++;
+      }
+    }
+
+    return count;
+  }
+
+  static String _tail(String text) {
+    if (text.isEmpty) {
+      return '""';
+    }
+
+    const maxLength = 40;
+
+    final start = text.length > maxLength
+        ? text.length - maxLength
+        : 0;
+
+    final value = text.substring(start);
+
+    return '"${value
+        .replaceAll('\\', r'\\')
+        .replaceAll('\n', r'\n')
+        .replaceAll('\r', r'\r')
+        .replaceAll('\t', r'\t')}"';
+  }
+
+  static String get path => _logFile.path;
+}

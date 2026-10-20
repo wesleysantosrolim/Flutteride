@@ -1,0 +1,143 @@
+import 'package:material_ui/material_ui.dart';
+
+class EditorRunBar extends StatelessWidget {
+  final bool isFlutterRunning;
+  final bool canHotReload;
+  final bool canHotRestart;
+  final bool canPreview;
+
+  final VoidCallback? onRun;
+  final VoidCallback? onHotReload;
+  final VoidCallback? onHotRestart;
+  final VoidCallback? onStop;
+  final VoidCallback? onPreview;
+
+  const EditorRunBar({
+    super.key,
+    required this.isFlutterRunning,
+    required this.canHotReload,
+    required this.canHotRestart,
+    required this.canPreview,
+    this.onRun,
+    this.onHotReload,
+    this.onHotRestart,
+    this.onStop,
+    this.onPreview,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      elevation: 1,
+      child: SizedBox(
+        height: 44,
+        child: Row(
+          children: [
+            const SizedBox(width: 6),
+
+            _RunBarIconButton(
+              tooltip: isFlutterRunning
+                  ? 'Executando'
+                  : 'Executar',
+              icon: isFlutterRunning
+                  ? Icons.pause_rounded
+                  : Icons.play_arrow_rounded,
+              onPressed:
+                  isFlutterRunning ? null : onRun,
+            ),
+
+            const SizedBox(width: 2),
+
+            _RunBarIconButton(
+              tooltip: 'Hot Reload',
+              icon: Icons.bolt_rounded,
+              iconColor: Colors.amber,
+              onPressed:
+                  canHotReload
+                      ? onHotReload
+                      : null,
+            ),
+
+            const SizedBox(width: 2),
+
+            _RunBarIconButton(
+              tooltip: 'Hot Restart',
+              icon: Icons.refresh_rounded,
+              iconColor: Colors.green,
+              onPressed:
+                  canHotRestart
+                      ? onHotRestart
+                      : null,
+            ),
+
+            const SizedBox(width: 2),
+
+            _RunBarIconButton(
+              tooltip: 'Parar',
+              icon: Icons.stop_rounded,
+              iconColor: Colors.red,
+              onPressed:
+                  isFlutterRunning
+                      ? onStop
+                      : null,
+            ),
+
+            const SizedBox(width: 2),
+
+            _RunBarIconButton(
+              tooltip: 'Preview',
+              icon: Icons.visibility_rounded,
+              onPressed:
+                  canPreview
+                      ? onPreview
+                      : null,
+            ),
+
+            const Spacer(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RunBarIconButton extends StatelessWidget {
+  final String tooltip;
+  final IconData icon;
+  final Color? iconColor;
+  final VoidCallback? onPressed;
+
+  const _RunBarIconButton({
+    required this.tooltip,
+    required this.icon,
+    this.iconColor,
+    this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onPressed != null;
+
+    return Tooltip(
+      message: tooltip,
+      child: IconButton(
+        visualDensity:
+            VisualDensity.compact,
+        padding: const EdgeInsets.all(8),
+        constraints:
+            const BoxConstraints(
+          minWidth: 40,
+          minHeight: 40,
+        ),
+        onPressed: onPressed,
+        icon: Icon(
+          icon,
+          size: 22,
+          color: enabled
+              ? iconColor
+              : null,
+        ),
+      ),
+    );
+  }
+}
