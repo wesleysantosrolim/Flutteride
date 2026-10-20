@@ -8,6 +8,7 @@ import '../../services/editor_file_service.dart';
 import '../../services/editor_analysis_coordinator.dart';
 import '../../services/editor_monaco_sync_service.dart';
 import '../../services/editor_monaco_completion_service.dart';
+import '../../services/editor_code_action_service.dart';
 import '../../../flutter/services/flutter_run_service.dart';
 import '../widgets/editor_app_bar.dart';
 import '../widgets/editor_file_explorer.dart';
@@ -40,6 +41,8 @@ class _EditorScreenState extends State<EditorScreen> {
   late final EditorMonacoSyncService _monacoSyncService;
 
   late final EditorMonacoCompletionService _completionService;
+
+  late final EditorCodeActionService _codeActionService;
 
   final FlutterRunService _flutterRunService = FlutterRunService.instance;
 
@@ -109,6 +112,10 @@ class _EditorScreenState extends State<EditorScreen> {
       analysisCoordinator: _analysisCoordinator,
     );
 
+    _codeActionService = EditorCodeActionService(
+      analysisCoordinator: _analysisCoordinator,
+    );
+
     _expandedPaths.add(widget.projectPath);
 
     _flutterOutputSubscription = _flutterRunService.output.listen((_) {});
@@ -131,6 +138,7 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   void dispose() {
     _completionService.dispose();
+    _codeActionService.dispose();
     _monacoSyncService.dispose();
 
     unawaited(_analysisCoordinator.dispose());
@@ -666,6 +674,7 @@ class _EditorScreenState extends State<EditorScreen> {
                                   onMonacoReady: _onMonacoReady,
                                   onContentChanged: _onContentChanged,
                                   syncService: _monacoSyncService,
+                                  codeActionService: _codeActionService,
                                 ),
                               ),
                             ],

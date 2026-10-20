@@ -3,6 +3,7 @@ import 'package:flutter_monaco/flutter_monaco.dart';
 
 import '../../models/editor_file_node.dart';
 import '../../services/editor_monaco_sync_service.dart';
+import '../../services/editor_code_action_service.dart';
 import '../widgets/monaco/editor_monaco.dart';
 
 class EditorArea extends StatelessWidget {
@@ -14,6 +15,7 @@ class EditorArea extends StatelessWidget {
   final void Function(MonacoController) onMonacoReady;
   final ValueChanged<String> onContentChanged;
   final EditorMonacoSyncService? syncService;
+  final EditorCodeActionService? codeActionService;
 
   const EditorArea({
     super.key,
@@ -25,6 +27,7 @@ class EditorArea extends StatelessWidget {
     required this.onMonacoReady,
     required this.onContentChanged,
     this.syncService,
+    this.codeActionService,
   });
 
   @override
@@ -130,6 +133,7 @@ class EditorArea extends StatelessWidget {
             onContentChanged: onContentChanged,
             onControllerReady: onMonacoReady,
             syncService: syncService,
+            codeActionService: codeActionService,
           ),
         ),
       ],

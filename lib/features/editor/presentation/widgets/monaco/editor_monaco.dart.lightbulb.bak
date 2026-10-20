@@ -1,0 +1,381 @@
+import 'dart:async';
+
+import 'package:material_ui/material_ui.dart';
+import 'package:flutter_monaco/flutter_monaco.dart';
+import 'package:flutteride/features/editor/services/editor_autocomplete_file_logger.dart';
+import 'package:flutteride/features/editor/services/editor_monaco_sync_service.dart';
+
+class EditorMonaco extends StatefulWidget {
+  final String? filePath;
+  final String fileContent;
+  final bool visible;
+  final ValueChanged<String>? onContentChanged;
+  final ValueChanged<MonacoController>? onControllerReady;
+  final EditorMonacoSyncService? syncService;
+
+  const EditorMonaco({
+    super.key,
+    required this.filePath,
+    required this.fileContent,
+    required this.visible,
+    this.onContentChanged,
+    this.onControllerReady,
+    this.syncService,
+  });
+
+  @override
+  State<EditorMonaco> createState() => _EditorMonacoState();
+}
+
+class _EditorMonacoState extends State<EditorMonaco>
+    with WidgetsBindingObserver {
+  MonacoController? _controller;
+
+  bool _ready = false;
+  bool _isSyncingContent = false;
+  bool _syncPending = false;
+
+  void _record(String message) {
+    unawaited(EditorAutocompleteFileLogger.log(message));
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    WidgetsBinding.instance.addObserver(this);
+    FocusManager.instance.addListener(_onFocusChanged);
+
+    _record('[TOUCH_DEBUG] initState');
+  }
+
+  @override
+  void dispose() {
+    FocusManager.instance.removeListener(_onFocusChanged);
+    WidgetsBinding.instance.removeObserver(this);
+
+    _record('[TOUCH_DEBUG] dispose');
+
+    super.dispose();
+  }
+
+  void _onFocusChanged() {
+    final focus = FocusManager.instance.primaryFocus;
+    final type = focus?.runtimeType.toString() ?? 'none';
+    final label = focus?.debugLabel ?? '-';
+
+    _record('[FOCUS] primaryType=$type debugLabel=$label');
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _record('[LIFECYCLE] state=${state.name}');
+  }
+
+  @override
+  void didChangeMetrics() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      final inset = MediaQuery.maybeOf(context)?.viewInsets.bottom;
+
+      _record('[KEYBOARD_METRICS] viewInsetsBottom=$inset');
+    });
+  }
+
+  Future<void> _handleReady(MonacoController controller) async {
+    _controller = controller;
+    _ready = true;
+
+    _record(
+      '[MONACO_READY] file=${widget.filePath ?? '-'} '
+      'visible=${widget.visible}',
+    );
+
+    widget.syncService?.attachMonacoController(controller);
+
+    widget.onControllerReady?.call(controller);
+
+    await _syncCurrentContent();
+
+    if (!mounted) return;
+
+    setState(() {});
+  }
+
+  /// Consulta o foco real no DOM do WebView.
+  ///
+  /// Esta função apenas coleta informações: não altera o foco
+  /// e não tenta abrir ou fechar o teclado.
+  Future<void> _logKeyboardDiagnostic(String source) async {
+    final controller = _controller;
+
+    if (!mounted || controller == null || !_ready) {
+      _record(
+        '[KEYBOARD_DIAG] source=$source '
+        'skipped=true ready=$_ready',
+      );
+      return;
+    }
+
+    try {
+      final result = await controller.evaluateJavaScript<String>('''
+JSON.stringify((() => {
+  const editor = document.querySelector('.monaco-editor');
+  const active = document.activeElement;
+  const input = editor
+    ? editor.querySelector('textarea.inputarea, .native-edit-context')
+    : null;
+  const viewport = window.visualViewport;
+
+  return {
+    editorExists: !!editor,
+    editorHasFocusedClass: !!editor?.classList.contains('focused'),
+    activeTag: active?.tagName ?? null,
+    activeId: active?.id ?? null,
+    activeClass: typeof active?.className === 'string'
+      ? active.className
+      : '',
+    inputExists: !!input,
+    inputTag: input?.tagName ?? null,
+    inputFocused: !!input && active === input,
+    inputReadOnly: input ? !!input.readOnly : null,
+    inputDisabled: input ? !!input.disabled : null,
+    innerHeight: window.innerHeight,
+    documentHeight: document.documentElement?.clientHeight ?? null,
+    visualViewportHeight: viewport?.height ?? null,
+    visualViewportOffsetTop: viewport?.offsetTop ?? null,
+    visualViewportScale: viewport?.scale ?? null
+  };
+})())
+''', defaultValue: '{"error":"resultado JavaScript vazio"}');
+
+      if (!mounted) return;
+
+      final inset = MediaQuery.maybeOf(context)?.viewInsets.bottom;
+
+      _record(
+        '[KEYBOARD_DIAG] source=$source '
+        'flutterViewInsetsBottom=$inset '
+        'javascript=${result ?? 'null'}',
+      );
+    } catch (error) {
+      _record('[KEYBOARD_DIAG_ERROR] source=$source error=$error');
+    }
+  }
+
+  /// Faz duas leituras para observar o foco imediatamente após o toque
+  /// e novamente durante a possível animação do teclado.
+  void _scheduleKeyboardDiagnostics() {
+    Future<void>.delayed(const Duration(milliseconds: 350), () {
+      if (!mounted) return;
+
+      unawaited(_logKeyboardDiagnostic('tap_plus_350ms'));
+    });
+
+    Future<void>.delayed(const Duration(milliseconds: 1000), () {
+      if (!mounted) return;
+
+      unawaited(_logKeyboardDiagnostic('tap_plus_1000ms'));
+    });
+  }
+
+  Future<void> _syncCurrentContent() async {
+    final controller = _controller;
+
+    if (controller == null || !_ready || !mounted) return;
+
+    // Nao descarta atualizacoes que chegam durante outra sincronizacao.
+    if (_isSyncingContent) {
+      _syncPending = true;
+      return;
+    }
+
+    _isSyncingContent = true;
+
+    try {
+      do {
+        _syncPending = false;
+
+        // Sempre captura a selecao mais recente.
+        final content = widget.fileContent;
+        final filePath = widget.filePath;
+
+        if (filePath == null) break;
+
+        await controller.whenReady;
+
+        if (!mounted) break;
+
+        if (widget.filePath != filePath || widget.fileContent != content) {
+          _syncPending = true;
+          continue;
+        }
+
+        final currentContent = await controller.document.getText();
+
+        if (!mounted) break;
+
+        if (widget.filePath != filePath || widget.fileContent != content) {
+          _syncPending = true;
+          continue;
+        }
+
+        if (currentContent != content) {
+          await controller.document.setText(content);
+        }
+
+        if (!mounted) break;
+
+        // A selecao pode mudar enquanto setText esta em andamento.
+        if (widget.filePath != filePath || widget.fileContent != content) {
+          _syncPending = true;
+          continue;
+        }
+
+        final language = _languageForFile(filePath);
+        await controller.document.setLanguage(language);
+
+        // Se chegou outra solicitacao durante a operacao, repete
+        // usando o caminho e o conteudo atuais do widget.
+        if (widget.filePath != filePath || widget.fileContent != content) {
+          _syncPending = true;
+        }
+      } while (_syncPending && mounted);
+    } catch (error) {
+      _record('[SYNC_ERROR] error=$error');
+
+      debugPrint('[EditorMonaco] Erro ao sincronizar conteúdo: $error');
+    } finally {
+      _isSyncingContent = false;
+
+      // Protecao para uma solicitacao pendente apos uma falha.
+      if (_syncPending && mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            unawaited(_syncCurrentContent());
+          }
+        });
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant EditorMonaco oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    final fileChanged = oldWidget.filePath != widget.filePath;
+
+    final contentChanged = oldWidget.fileContent != widget.fileContent;
+
+    if (fileChanged || contentChanged) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+
+        unawaited(_syncCurrentContent());
+      });
+    }
+  }
+
+  MonacoLanguage _languageForFile(String path) {
+    final lower = path.toLowerCase();
+
+    if (lower.endsWith('.dart')) return MonacoLanguage.dart;
+    if (lower.endsWith('.json')) return MonacoLanguage.json;
+
+    if (lower.endsWith('.yaml') || lower.endsWith('.yml')) {
+      return MonacoLanguage.yaml;
+    }
+
+    if (lower.endsWith('.md')) return MonacoLanguage.markdown;
+    if (lower.endsWith('.xml')) return MonacoLanguage.xml;
+    if (lower.endsWith('.html')) return MonacoLanguage.html;
+    if (lower.endsWith('.css')) return MonacoLanguage.css;
+    if (lower.endsWith('.js')) return MonacoLanguage.javascript;
+    if (lower.endsWith('.ts')) return MonacoLanguage.typescript;
+
+    return MonacoLanguage.plaintext;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    final isDark = theme.brightness == Brightness.dark;
+
+    final background = isDark ? const Color(0xFF1E1E1E) : Colors.white;
+
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) {
+        _record(
+          '[POINTER_DOWN] x=${event.localPosition.dx} '
+          'y=${event.localPosition.dy} kind=${event.kind} '
+          'ready=$_ready visible=${widget.visible} '
+          'file=${widget.filePath ?? '-'}',
+        );
+
+        _scheduleKeyboardDiagnostics();
+      },
+      onPointerUp: (event) {
+        _record(
+          '[POINTER_UP] kind=${event.kind} '
+          'ready=$_ready visible=${widget.visible}',
+        );
+      },
+      onPointerCancel: (event) {
+        _record('[POINTER_CANCEL] kind=${event.kind}');
+      },
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          MonacoEditor(
+            initialText: widget.fileContent,
+            backgroundColor: background,
+            options: EditorOptions(
+              language: widget.filePath != null
+                  ? _languageForFile(widget.filePath!)
+                  : MonacoLanguage.dart,
+              theme: isDark ? MonacoTheme.vsDark : MonacoTheme.vs,
+              fontSize: 14,
+              wordWrap: MonacoWordWrap.off,
+              minimap: const MonacoMinimapOptions(enabled: false),
+              tabSize: 2,
+              insertSpaces: true,
+              detectIndentation: false,
+              formatOnPaste: false,
+              quickSuggestions: true,
+              suggestOnTriggerCharacters: true,
+            ),
+            onReady: _handleReady,
+            onContentChanged: widget.onContentChanged,
+            loadingBuilder: (context) {
+              return Container(color: background);
+            },
+            errorBuilder: (context, error, stackTrace) {
+              _record('[MONACO_ERROR] error=$error');
+
+              return Container(
+                color: background,
+                alignment: Alignment.center,
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'Erro ao carregar o Monaco:\n$error',
+                  textAlign: TextAlign.center,
+                ),
+              );
+            },
+          ),
+          if (!widget.visible || !_ready)
+            Container(
+              color: background,
+              alignment: Alignment.center,
+              child: !_ready
+                  ? const SizedBox.shrink()
+                  : const Text('Selecione um arquivo para começar'),
+            ),
+        ],
+      ),
+    );
+  }
+}

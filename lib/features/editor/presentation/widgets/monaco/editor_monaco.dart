@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_monaco/flutter_monaco.dart';
 import 'package:flutteride/features/editor/services/editor_autocomplete_file_logger.dart';
+import 'package:flutteride/features/editor/services/editor_code_action_service.dart';
 import 'package:flutteride/features/editor/services/editor_monaco_sync_service.dart';
 
 class EditorMonaco extends StatefulWidget {
@@ -12,6 +13,7 @@ class EditorMonaco extends StatefulWidget {
   final ValueChanged<String>? onContentChanged;
   final ValueChanged<MonacoController>? onControllerReady;
   final EditorMonacoSyncService? syncService;
+  final EditorCodeActionService? codeActionService;
 
   const EditorMonaco({
     super.key,
@@ -21,6 +23,7 @@ class EditorMonaco extends StatefulWidget {
     this.onContentChanged,
     this.onControllerReady,
     this.syncService,
+    this.codeActionService,
   });
 
   @override
@@ -34,6 +37,7 @@ class _EditorMonacoState extends State<EditorMonaco>
   bool _ready = false;
   bool _isSyncingContent = false;
   bool _syncPending = false;
+  bool _isLoadingCodeActions = false;
 
   void _record(String message) {
     unawaited(EditorAutocompleteFileLogger.log(message));
@@ -93,6 +97,8 @@ class _EditorMonacoState extends State<EditorMonaco>
     );
 
     widget.syncService?.attachMonacoController(controller);
+    widget.codeActionService?.attachController(controller);
+    widget.codeActionService?.setActiveFile(widget.filePath);
 
     widget.onControllerReady?.call(controller);
 
@@ -266,6 +272,10 @@ JSON.stringify((() => {
 
     final fileChanged = oldWidget.filePath != widget.filePath;
 
+    if (fileChanged) {
+      widget.codeActionService?.setActiveFile(widget.filePath);
+    }
+
     final contentChanged = oldWidget.fileContent != widget.fileContent;
 
     if (fileChanged || contentChanged) {
@@ -295,6 +305,105 @@ JSON.stringify((() => {
     if (lower.endsWith('.ts')) return MonacoLanguage.typescript;
 
     return MonacoLanguage.plaintext;
+  }
+
+  Future<void> _showCodeActions() async {
+    final controller = _controller;
+    final service = widget.codeActionService;
+    final path = widget.filePath;
+
+    if (!mounted ||
+        controller == null ||
+        service == null ||
+        path == null ||
+        _isLoadingCodeActions ||
+        !_ready) {
+      return;
+    }
+
+    setState(() => _isLoadingCodeActions = true);
+
+    try {
+      await controller.whenReady;
+
+      final cursor = await controller.getCursorPosition();
+      if (cursor == null || !mounted) return;
+
+      final documentText = await controller.document.getText();
+      final actions = await service.requestActions(
+        path: path,
+        line: cursor.line > 0 ? cursor.line - 1 : 0,
+        character: cursor.column > 0 ? cursor.column - 1 : 0,
+        documentText: documentText,
+      );
+
+      if (!mounted) return;
+
+      if (actions.isEmpty) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Nenhuma ação de código disponível nesta posição.',
+            ),
+          ),
+        );
+        return;
+      }
+
+      final selectedAction = await showModalBottomSheet<DartCodeAction>(
+        context: context,
+        showDragHandle: true,
+        builder: (sheetContext) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 4, 20, 12),
+                child: Text(
+                  'Ações de código',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              for (final action in actions)
+                ListTile(
+                  leading: const Icon(Icons.lightbulb_outline),
+                  title: Text(action.title),
+                  subtitle:
+                      action.kind == null ? null : Text(action.kind!),
+                  onTap: () => Navigator.of(sheetContext).pop(action),
+                ),
+            ],
+          ),
+        ),
+      );
+
+      if (selectedAction == null || !mounted) return;
+
+      await service.applyAction(
+        action: selectedAction,
+        activeFilePath: path,
+      );
+
+      final updatedText = await controller.document.getText();
+      if (!mounted || widget.filePath != path) return;
+
+      widget.onContentChanged?.call(updatedText);
+    } catch (error) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(
+          content: Text('Não foi possível executar a ação: $error'),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingCodeActions = false);
+      }
+    }
   }
 
   @override
@@ -366,6 +475,32 @@ JSON.stringify((() => {
               );
             },
           ),
+          if (widget.visible &&
+              _ready &&
+              widget.filePath?.toLowerCase().endsWith('.dart') == true &&
+              widget.codeActionService != null)
+            Positioned(
+              top: 8,
+              right: 8,
+              child: Material(
+                color: theme.colorScheme.surface.withValues(alpha: 0.92),
+                elevation: 2,
+                shape: const CircleBorder(),
+                clipBehavior: Clip.antiAlias,
+                child: IconButton(
+                  tooltip: 'Ações de código',
+                  onPressed:
+                      _isLoadingCodeActions ? null : _showCodeActions,
+                  icon: _isLoadingCodeActions
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.lightbulb_outline),
+                ),
+              ),
+            ),
           if (!widget.visible || !_ready)
             Container(
               color: background,

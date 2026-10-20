@@ -1,0 +1,161 @@
+Script started on 2026-10-20 19:08:07+0000
+path = Path("/mnt/data/aplicar_lightbulb_flutteride.py")
+path.write_text(script, encoding="utf-8")
+print(f"Arquivo criado: {path} ({path.stat().st_size} bytes)")
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ path = Path("/mnt/data/aplicar_lighttbulb_flutteride.py")
+bash: syntax error near unexpected token `('
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [Kpath.write_text(script, encoding="uttf-8")
+bash: syntax error near unexpected token `script,'
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [Kprint(f"Arquivo criado: {path} ({patth.stat().st_size} bytes)")
+bash: syntax error near unexpected token `f"Arquivo criado: {path} ({path.stat().st_size} bytes)"'
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K[K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ python3 aplicar_lightbulb_flutteridee.py
+ERRO: 'ascii' codec can't encode characters in position 7-8: ordinal not in range(128)
+Os arquivos n\xe3o foram alterados se a valida\xe7\xe3o inicial falhou.
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K[K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ export PYTHONIOENCODING=utf-8
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ export LANG=C.UTF-8
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ export LC_ALL=C.UTF-8
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ python3 aplicar_lightbulb_flutteridee.py
+ERRO: Não foi possível aplicar 'parâmetro codeActionService': esperado 1 trecho, encontrado 0. Nenhum arquivo foi alterado.
+Os arquivos não foram alterados se a validação inicial falhou.
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ python3 -c "from pathlib import Pathh; p=Path('lib/features/editor/presentation/widgets/monaco/editor_monaco.dart'); s=p.read_texxt(encoding='utf-8'); print(repr(s[s.find('this.syncService')-100:s.find('this.syncService')++180]))"
+'.fileContent,\n    required this.visible,\n    this.onContentChanged,\n    this.onControllerReady,\n    this.syncService,\n    this.codeActionService,\n  });\n\n  @override\n  State<EditorMonaco> createState() => _EditorMonacoState();\n}\n\nclass _EditorMonacoState extends State<EditorMonaco'
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ python3 - <<'PY'
+> from pathlib import Path
+> 
+> files = [
+>     "lib/features/editor/presentation/widgets/monaco/editor_monaco.dart",
+>     "lib/features/editor/presentation/screens/editor_area.dart",
+>     "lib/features/editor/presentation/screens/editor_screen.dart",
+> ]
+> 
+> terms = [
+>     "EditorCodeActionService",
+>     "codeActionService",
+>     "_showCodeActions",
+>     "_isLoadingCodeActions",
+>     "DartCodeAction",
+> ]
+> 
+> for name in files:
+>     path = Path(name)
+>     print("\n===== " + name + " =====")
+>     if not path.is_file():
+>         print("ARQUIVO NÃO ENCONTRADO")
+>         continue
+> 
+>     text = path.read_text(encoding="utf-8")
+>     for term in terms:
+>         print("{}: {}".format(term, text.count(term)))
+> PY
+
+===== lib/features/editor/presentation/widgets/monaco/editor_monaco.dart =====
+EditorCodeActionService: 1
+codeActionService: 7
+_showCodeActions: 2
+_isLoadingCodeActions: 6
+DartCodeAction: 1
+
+===== lib/features/editor/presentation/screens/editor_area.dart =====
+EditorCodeActionService: 1
+codeActionService: 4
+_showCodeActions: 0
+_isLoadingCodeActions: 0
+DartCodeAction: 0
+
+===== lib/features/editor/presentation/screens/editor_screen.dart =====
+EditorCodeActionService: 2
+codeActionService: 5
+_showCodeActions: 0
+_isLoadingCodeActions: 0
+DartCodeAction: 0
+]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [K]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ python3 - <<'PY'
+from pathlib import Path
+
+files = [
+    "lib/features/editor/presentation/widgets/monaco/editor_monaco.dart",
+    "lib/features/editor/presentation/screens/editor_area.dart",
+    "lib/features/editor/presentation/screens/editor_screen.dart",
+]
+
+terms = [
+    "EditorCodeActionService",
+    "codeActionService",
+    "_showCodeActions",
+    "_isLoadingCodeActions",
+    "DartCodeAction",
+]
+
+for name in files:
+    path = Path(name)
+    print("\n===== " + name + " =====")
+    if not path.is_file():
+        print("ARQUIVO NÃO ENCONTRADO")
+        continue
+
+    text = path.read_text(encoding="utf-8")
+    for term in terms:
+        print("{}: {}".format(term, text.count(term)))
+PY
+[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cc "from pathlib import Path; p=Path('lib/features/editor/presentation/widgets/monaco/editor_monaco.dart'); s=p.read_texxt(encoding='utf-8'); print(repr(s[s.find('this.syncService')-100:s.find('this.syncService')+[1P180]))"
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[A[C[C[C[C[C[C[C[C[A[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[C[C[C[Caplicar_lightbulb_flutteride.py[K
+[K
+[K[A[A[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [14Pexport LC_ALL=C.UTF-8
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[2PANG=C.UTF-8PYTHONIOENCODING=utf-8python3 aplicar_lightbulb_flutteridee.py[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [Crint(f"Arquivo criado: {path} ({path.stat().st_size} bytes)")[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [Cath.write_text(script, encoding="utf-8")[K[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C = Path("/mnt/data/aplicar_lightbulb_flutteride.py")[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ exit[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cgit push -u origin mainecho "140.82.112.4 github.com" >> /eetc/hosts[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [12Pgit push -u origin main
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cecho "nameserver 8.8.8.8" > /etc/ressolv.conf[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [18Pping -c 3 8.8.8.8
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cgit push -u origin mainremote add origin https://githubb.com/wesleysantosrolim/Flutteride.git[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[17Pbranch -M main
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Ccommit -m "Commit inicial: estruutura do Flutteride"[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[17Pbranch -M main
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Ccommit -m "Commit inicial: estruutura do Flutteride"[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[Cadd .[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cbranch -M maininit[Kconfig --global user.email "weslley.rolim02@hotmail.com"[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cname "wesle[10Pysantosrolim"[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cemail "wesley.rolim02@hotmail.com"[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cname "wesle[10Pysantosrolim" && git config --global user.email "wesley.rolim02@hotmail.com" && git init &&  git branch -M main && git remote add origin https://github.com/wesleysantosrolim/Flutteride..git && git add . && git commit -m "Commit inicial: estrutura do Flutteride" && git push -u oorigin main[A[A[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ cd /storage/internal_new/project/flutteride[K
+[K
+[K
+[K[A[A[A[C[C[C[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ exit[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cgrep -n -B 5 -A 12   -E 'class EditoorAnalysisCoordinator|isInitialized|sendRequest|textDocument/codeAction'   lib/features/editoor/services/editor_analysis_coordinator.dart[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== COORDENADOR DE ANALISE ====="[K
+[K[A[C[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Csed -n '1,115p' lib/features/editor//services/editor_code_action_service.dart[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== ENVIO DA SOLICITACAO COD[25PE ACTION ====="[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cgrep -n -B 10 -A 16   -E 'EditorCodeeActionService|_completionService|_analysisCoordinator'   lib/features/editor/presentation/sccreens/editor_screen.dart[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== INICIALIZACAO DO SERVICO ====="[K
+[K[A[C[C[C[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ cd /storage/internal_new/project/flutteride || exit 1[C[C[C[C[C[C[C[C[K[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ exit[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Ccitgrep -R -n --include='*.dart' --incllude='*.js'   -E 'registerCodeActions|codeActionApply|codeAction|FMB\.codeActions|registerCoddeActionProvider'   lib/features/editor packages/flutter_monaco/lib packages/flutter_monaco/aassets/monaco/bridge[A[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== API DA PONTE CODE ACTIONS ====="[K
+[K
+[K[A[A[C[C[C[C[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cgrep -n -E '^[[:space:]]*(class |Futture<|void |bool |String |Map<|List<|  [a-zA-Z_].*\()'   lib/features/editor/services/editor__code_action_service.dart[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== API DO SERVICO DE CODE ACTIONS ====="[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ cd /storage/internal_new/project/flutteride || exit 1[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ grep -R -n   --include='*.dart'   -E 'class EditorCodeActionService|registerCodeActionProvider|textDocumentCodeAction|connectLannguageServer'   lib packages/flutter_monaco/lib[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== IMPLEMENTACAO DE CODE ACTIONS ====="[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cgrep -n -B 8 -A 22   -E 'connectLangguageServer|languageServerConnection|EditorCodeActionService|_onMonacoReady'   lib/features/eeditor/presentation/screens/editor_screen.dart[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== CONEXAO LSP NO EDITOR ====="[K
+[K[A[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ cd /storage/internal_new/project/flutteride || exit 1[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ grep -n -E -C 8   'EditorAnalysisCoordinator|EditorCodeActionService|MonacoController|onControllerCreated|onEditorCreated'   libb/features/editor/presentation/screens/editor_screen.dart[A[Acd /storage/internal_new/project/flutteride[K
+[K[A[C[C[C[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ exit[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cgrep -n -E -C 4   'FlutterMonaco\.reegister|FlutterMonaco\.request|dropRequest|respond|case .completion.|signatureHelp'   packagees/flutter_monaco/assets/monaco/bridge/editor-api.js   packages/flutter_monaco/assets/monaco//bridge/boot.js[A[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== 4. PROTOCOLO JAVASCRIPT ====="[K
+[K
+[K[A[A[C[C[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cgrep -R -n -E -C 5   'EditorCodeActiionService|analysisCoordinator|MonacoController\('   lib/features/editor   --include='*.dart'' 2>/dev/null[A[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== 3. USO DO SERVICO NO EDITOR ====="[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Csed -n '1,260p'   packages/flutter_mmonaco/lib/src/editor/controller.dart[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== 2. CONTROLLER DO MONACO ====="[K[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Csed -n '1,280p'   lib/features/editoor/services/editor_code_action_service.dart[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ echo "===== 1. SERVICO DE CODE ACTIONS ====="[K[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ cd /storage/internal_new/project/flutteride || exit 1[C[C[C[C[C[C[C[C[K[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ exit[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cflutter build apk --debug --target-pplatform android-arm64 --android-skip-build-dependency-validation[Agrep -n -B 4 -A 15   'FLUTTERIDE_LIGHTBULB_OPTIONS'   packages/flutter_monaco/assets/monaco/bridge/boot.js[Aecho "===== VERIFICAR CONFIGURACAO ====="[K[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ [C[C[C[C[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[2PPYprint("lightbulb.enabled: on (respeiita configuração explícita)")[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ PY[K
+[K[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[Cecho "===== VERIFICAR CONFIGURACAO ======"[A]0;test@localhost: /storage/internal_new/project/flutteride[01;32mtest@localhost[00m:[01;34m/storage/internal_new/project/flutteride[00m$ grep -n -B 4 -A 15   'FLUTTERIDE_LIGHTBULB_OPTIONS'   packages/flutter_monaco/assets/monaco/bridge/boot.js[Aflutter build apk --debug --target-p[6Platform android-arm64 --android-skip-build-dependency-validation
+Running Gradle task 'assembleDebug'...                                 ⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯⣟⡿⢿⣻⣽⣾⣷⣯�
