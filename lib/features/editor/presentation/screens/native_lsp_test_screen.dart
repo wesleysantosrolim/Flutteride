@@ -1,3 +1,4 @@
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -260,36 +261,51 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
     );
   }
 
-  void _inspectClientMessage(Map<String, Object?> message) {
-    final method = message['method'];
+void _inspectClientMessage(Map<String, Object?> message) {
+  final method = message['method'];
 
-    if (method == 'textDocument/didOpen') {
-      final params = message['params'];
-      final document = params is Map ? params['textDocument'] : null;
-      final uri = document is Map ? document['uri']?.toString() : null;
+  if (method == 'textDocument/didOpen') {
+    final params = message['params'];
+    final document = params is Map ? params['textDocument'] : null;
+    final uri = document is Map ? document['uri']?.toString() : null;
 
-      if (uri == _documentUri.toString()) {
-        _didOpenObserved = true;
+    if (uri == _documentUri.toString()) {
+      _didOpenObserved = true;
 
-        unawaited(
-          NativeLspLogger.info(
-            'test_screen.did_open.observed',
-            details: 'uri=$uri; '
-                'message=${_shortJson(message)}',
-          ),
-        );
-      }
+      unawaited(
+        NativeLspLogger.info(
+          'test_screen.did_open.observed',
+          details: 'uri=$uri; '
+              'message=${_shortJson(message)}',
+        ),
+      );
     }
-
-    unawaited(
-      NativeLspLogger.info(
-        'lsp.client.message',
-        details: 'method=${method ?? "(response)"}; '
-            'id=${message['id'] ?? "(notification)"}; '
-            'params=${_shortJson(message['params'])}',
-      ),
-    );
   }
+
+  // Respostas JSON-RPC nao possuem "method".
+  // O log anterior mostrava apenas params=null e ocultava o erro real.
+  final responseError = message['error'];
+  final isResponse = method == null && message.containsKey('id');
+
+  final Object? loggedPayload = isResponse
+      ? <String, Object?>{
+          if (message.containsKey('result'))
+            'result': message['result'],
+          if (responseError != null) 'error': responseError,
+        }
+      : message['params'];
+
+  unawaited(
+    NativeLspLogger.info(
+      'lsp.client.message',
+      details: 'method=${method ?? "(response)"}; '
+          'id=${message['id'] ?? "(notification)"}; '
+          'hasResult=${message.containsKey('result')}; '
+          'hasError=${responseError != null}; '
+          'payload=${_shortJson(loggedPayload, maxLength: 2400)}',
+    ),
+  );
+}
 
   String _shortJson(Object? value, {int maxLength = 1800}) {
     String result;
@@ -340,9 +356,6 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
 
       final transport = _instrumentTransport(rawTransport);
 
-      // O cliente LSP nativo e o servidor sao conectados primeiro.
-      // O documento sera reaberto depois da conexao se o didOpen
-      // automatico nao tiver sido enviado.
       _didOpenObserved = false;
 
       final connection = await controller.connectLanguageServer(
@@ -364,7 +377,6 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
             'connectionState=${connection.state.status}',
       );
 
-      // Aguarda o cliente nativo abrir o documento existente.
       await Future<void>.delayed(_didOpenTimeout);
 
       if (_disposed) return;
@@ -378,7 +390,6 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
 
         await _reopenDocumentAfterConnection();
 
-        // O evento didOpen e observado no transporte instrumentado.
         await Future<void>.delayed(_didOpenTimeout);
       }
 
@@ -396,7 +407,6 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
           'Conectado. Documento aberto pelo cliente nativo do Monaco.',
         );
       } else {
-        // Ultimo recurso para investigar se o cliente nao emite didOpen.
         await NativeLspLogger.warning(
           'test_screen.did_open.native.failed',
           details: 'O didOpen automatico continua ausente apos '
@@ -446,10 +456,6 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
     }
   }
 
-  /// Fecha o modelo criado antes da conexao e cria outro com a mesma URI.
-  ///
-  /// Isso permite ao cliente LSP nativo observar a abertura do documento
-  /// quando o modelo passa a existir depois de a conexao estar ativa.
   Future<void> _reopenDocumentAfterConnection() async {
     final controller = _controller;
     final oldDocument = _document;
@@ -632,6 +638,8 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
     _showStatus('Sincronizacao manual do documento executada.');
   }
 
+  /// Solicita completion e aceita os formatos de resposta LSP suportados
+  /// pelo cliente customizado do FlutterIDE.
   Future<void> _testCompletion() async {
     if (_disposed || _testing) return;
 
@@ -668,7 +676,7 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
         );
       }
 
-      // Monaco inicia linhas e colunas em 1; LSP inicia em 0.
+      // Monaco usa indices iniciando em 1; o LSP usa indices iniciando em 0.
       final line = cursor.line > 0 ? cursor.line - 1 : 0;
       final character = cursor.column > 0 ? cursor.column - 1 : 0;
 
@@ -682,7 +690,7 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
             'manualSync=$_manualDocumentSync',
       );
 
-      final result = await connection.sendRequest(
+      final dynamic response = await connection.sendRequest(
         'textDocument/completion',
         {
           'textDocument': {
@@ -692,36 +700,86 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
             'line': line,
             'character': character,
           },
+          'context': {
+            'triggerKind': 1,
+          },
         },
         const Duration(seconds: 30),
       );
 
-      final resultMap = result is Map
-          ? Map<String, Object?>.from(result)
-          : <String, Object?>{'result': result};
+      // O servidor pode retornar diretamente uma lista de CompletionItem
+      // ou um CompletionList com a propriedade "items".
+      Map<String, Object?> resultMap = <String, Object?>{};
+      List<dynamic> items = <dynamic>[];
 
-      final itemsValue = resultMap['items'];
-      final items = itemsValue is List ? itemsValue : <Object?>[];
+      if (response is List) {
+        items = List<dynamic>.from(response);
+        resultMap = <String, Object?>{
+          'isIncomplete': false,
+          'items': items,
+        };
+      } else if (response is Map) {
+        resultMap = Map<String, Object?>.from(response);
+        dynamic itemsValue = resultMap['items'];
+
+        // Aceita tambem uma resposta que ainda contenha o envelope JSON-RPC.
+        if (itemsValue is! List && resultMap['result'] is Map) {
+          final nested = Map<String, Object?>.from(
+            resultMap['result'] as Map,
+          );
+
+          if (nested['items'] is List) {
+            resultMap = nested;
+            itemsValue = nested['items'];
+          }
+        }
+
+        if (itemsValue is! List && resultMap['result'] is List) {
+          itemsValue = resultMap['result'];
+        }
+
+        if (itemsValue is List) {
+          items = List<dynamic>.from(itemsValue);
+        } else if (resultMap['items'] is List) {
+          items = List<dynamic>.from(resultMap['items'] as List);
+        }
+      } else if (response == null) {
+        resultMap = <String, Object?>{
+          'isIncomplete': false,
+          'items': <Object?>[],
+        };
+      } else {
+        resultMap = <String, Object?>{
+          'unexpectedResponseType': response.runtimeType.toString(),
+          'response': response.toString(),
+          'items': <Object?>[],
+        };
+      }
 
       final labels = <String>[];
 
-      for (final item in items) {
-        if (item is Map && item['label'] != null) {
-          labels.add(item['label'].toString());
+      for (final value in items) {
+        if (value is Map && value['label'] != null) {
+          final label = value['label'].toString();
+
+          if (label.isNotEmpty) {
+            labels.add(label);
+          }
         }
       }
 
       final completeResponse = _shortJson(
         resultMap,
-        maxLength: 3500,
+        maxLength: 10000,
       );
 
       await NativeLspLogger.info(
         'test_screen.completion.response',
         details: 'uri=$_documentUri; '
+            'responseType=${response.runtimeType}; '
             'items=${items.length}; '
             'isIncomplete=${resultMap['isIncomplete']}; '
-            'labels=${labels.join(', ')}; '
+            'labels=${labels.take(40).join(', ')}; '
             'response=$completeResponse',
       );
 
@@ -731,8 +789,9 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
         _lastCompletion = 'Resposta do Dart Analysis Server:\n'
             'URI: $_documentUri\n'
             'Posicao LSP: linha $line, coluna $character\n'
+            'Tipo de resposta: ${response.runtimeType}\n'
             'Itens: ${items.length}\n'
-            'isIncomplete: ${resultMap['isIncomplete']}\n'
+            'isIncomplete: ${resultMap['isIncomplete'] ?? false}\n'
             'Sugestoes: ${labels.isEmpty ? "(nenhuma)" : labels.join(', ')}'
             '\n\nJSON:\n$completeResponse';
 
