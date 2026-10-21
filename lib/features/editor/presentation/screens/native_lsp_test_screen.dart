@@ -1,24 +1,24 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_monaco/flutter_monaco.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 import '../../native_lsp/native_lsp_logger.dart';
 import '../../native_lsp/native_lsp_transport_service.dart';
 
-/// Tela experimental para validar o LSP nativo do Monaco.
-///
-/// Esta tela nao utiliza o EditorAnalysisCoordinator nem os servicos antigos
-/// de autocomplete e Code Actions. O objetivo e testar a conexao isoladamente.
+/// Tela experimental para investigar a integracao entre Monaco
+/// e Dart Analysis Server por meio do cliente LSP nativo do Monaco.
 class NativeLspTestScreen extends StatefulWidget {
   const NativeLspTestScreen({
     super.key,
-    this.projectPath = '/root/projects/teste',
+    this.projectPath = '/root/projects/casa',
   });
 
-  /// Caminho do projeto visto de dentro do Ubuntu/PRoot.
   final String projectPath;
 
   @override
@@ -29,19 +29,38 @@ class NativeLspTestScreen extends StatefulWidget {
 class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
   static const String _connectionId = 'native-dart-lsp-test';
 
+  static const Duration _syncDelay = Duration(milliseconds: 250);
+
+  static const Duration _didOpenTimeout = Duration(milliseconds: 500);
+
   MonacoController? _controller;
+  MonacoDocument? _document;
   LanguageServerConnection? _connection;
 
+  StreamSubscription<MonacoContentChanged>? _contentSubscription;
+  Timer? _syncTimer;
+
+  late final Uri _documentUri = Uri.file(
+    '${widget.projectPath}/lib/app.dart',
+  );
+
+  String _sourceText = '';
+  String _status = 'Inicializando Monaco...';
+  String? _lastError;
+  String? _lastCompletion;
+  String? _lastDocumentPath;
+
   bool _editorReady = false;
+  bool _documentReady = false;
   bool _connecting = false;
   bool _connected = false;
   bool _disposed = false;
-  bool _testingLog = false;
+  bool _testing = false;
+  bool _syncing = false;
+  bool _didOpenObserved = false;
+  bool _manualDocumentSync = false;
 
-  String _status = 'Inicializando Monaco...';
-  String? _lastError;
-  String? _logTestResult;
-  bool? _logTestSucceeded;
+  int _documentVersion = 1;
 
   @override
   void initState() {
@@ -50,7 +69,8 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
     unawaited(
       NativeLspLogger.info(
         'test_screen.open',
-        details: 'projectPath=${widget.projectPath}',
+        details: 'projectPath=${widget.projectPath}; '
+            'uri=$_documentUri',
       ),
     );
   }
@@ -58,160 +78,272 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
   @override
   void dispose() {
     _disposed = true;
+    _syncTimer?.cancel();
 
-    final controller = _controller;
+    unawaited(
+      _contentSubscription?.cancel() ?? Future<void>.value(),
+    );
 
-    if (controller != null && _connected) {
+    final connection = _connection;
+    if (connection != null) {
       unawaited(
-        controller.disconnectLanguageServer(_connectionId).catchError(
-          (Object error) {
-            NativeLspLogger.warning(
-              'test_screen.disconnect_on_dispose.failed',
-              details: error,
-            );
-          },
-        ),
+        connection.disconnect().catchError((Object error) {
+          NativeLspLogger.warning(
+            'test_screen.disconnect_on_dispose.failed',
+            details: error,
+          );
+        }),
       );
     }
 
-    unawaited(
-      NativeLspLogger.info('test_screen.close'),
-    );
-
+    unawaited(NativeLspLogger.info('test_screen.close'));
     super.dispose();
   }
 
-  void _onEditorReady(MonacoController controller) {
-    if (_disposed) {
-      return;
+  Future<String> _loadProjectFile() async {
+    final appDirectory = await getApplicationSupportDirectory();
+
+    final relativeProjectPath = widget.projectPath
+        .replaceFirst(RegExp(r'^/+'), '')
+        .split('/');
+
+    final hostProjectDirectory = p.joinAll([
+      appDirectory.path,
+      'ubuntu_rootfs',
+      ...relativeProjectPath,
+    ]);
+
+    final hostFilePath = p.join(
+      hostProjectDirectory,
+      'lib',
+      'app.dart',
+    );
+
+    final file = File(hostFilePath);
+
+    await NativeLspLogger.info(
+      'test_screen.file.load.begin',
+      details: 'guestPath=${widget.projectPath}/lib/app.dart; '
+          'hostPath=$hostFilePath',
+    );
+
+    if (!await file.exists()) {
+      throw FileSystemException(
+        'O arquivo lib/app.dart nao foi encontrado no rootfs.',
+        hostFilePath,
+      );
     }
+
+    final text = await file.readAsString(encoding: utf8);
+
+    if (text.trim().isEmpty) {
+      throw FileSystemException(
+        'O arquivo lib/app.dart esta vazio.',
+        hostFilePath,
+      );
+    }
+
+    _lastDocumentPath = hostFilePath;
+
+    await NativeLspLogger.info(
+      'test_screen.file.load.success',
+      details: 'path=$hostFilePath; '
+          'characters=${text.length}; '
+          'lines=${text.split('\n').length}',
+    );
+
+    return text;
+  }
+
+  Future<void> _onEditorReady(MonacoController controller) async {
+    if (_disposed) return;
 
     _controller = controller;
 
-    setState(() {
-      _editorReady = true;
-      _status = 'Monaco pronto. Conexao LSP ainda nao iniciada.';
-    });
+    if (mounted) {
+      setState(() {
+        _editorReady = true;
+        _status = 'Monaco pronto. Carregando lib/app.dart...';
+      });
+    }
 
-    unawaited(
-      NativeLspLogger.info('test_screen.monaco.ready'),
+    await NativeLspLogger.info('test_screen.monaco.ready');
+
+    try {
+      final text = await _loadProjectFile();
+
+      if (_disposed) return;
+
+      final document = await controller.openDocument(
+        text: text,
+        language: MonacoLanguage.dart,
+        uri: _documentUri,
+      );
+
+      await controller.activateDocument(document);
+
+      if (_disposed) return;
+
+      _document = document;
+      _sourceText = text;
+
+      _contentSubscription = controller.onContentChanged.listen(
+        (_) => _scheduleDocumentSync(),
+        onError: (Object error, StackTrace stackTrace) {
+          unawaited(
+            NativeLspLogger.error(
+              'test_screen.content_stream.error',
+              exception: error,
+              stackTrace: stackTrace,
+            ),
+          );
+        },
+      );
+
+      if (mounted) {
+        setState(() {
+          _documentReady = true;
+          _status = 'Arquivo real carregado. Conecte o LSP.';
+        });
+      }
+
+      await NativeLspLogger.info(
+        'test_screen.document.ready',
+        details: 'uri=${document.uri}; '
+            'characters=${text.length}; '
+            'contentMatchesFile=${text == await document.getText()}',
+      );
+    } catch (error, stackTrace) {
+      await NativeLspLogger.error(
+        'test_screen.document.load.failed',
+        exception: error,
+        stackTrace: stackTrace,
+      );
+
+      if (!_disposed && mounted) {
+        setState(() {
+          _lastError = error.toString();
+          _status = 'Falha ao carregar lib/app.dart.';
+        });
+      }
+    }
+  }
+
+  LspBridgedTransport _instrumentTransport(
+    LspBridgedTransport original,
+  ) {
+    return LspBridgedTransport(
+      fromServer: original.fromServer.map((message) {
+        final method = message['method'];
+        final id = message['id'];
+        final result = message['result'];
+        final error = message['error'];
+
+        unawaited(
+          NativeLspLogger.info(
+            'lsp.server.message',
+            details: 'method=${method ?? "(response)"}; '
+                'id=${id ?? "(notification)"}; '
+                'hasResult=${result != null}; '
+                'hasError=${error != null}; '
+                'message=${_shortJson(message)}',
+          ),
+        );
+
+        return message;
+      }),
+      toServer: (message) {
+        _inspectClientMessage(message);
+        original.toServer(message);
+      },
+      onClose: original.onClose,
     );
   }
 
-  /// Testa a gravacao do arquivo pelo proprio aplicativo Android.
-  ///
-  /// Esse teste e independente da conexao com o Dart Analysis Server.
-  Future<void> _testLogWrite() async {
-    if (_disposed || _testingLog) {
-      return;
+  void _inspectClientMessage(Map<String, Object?> message) {
+    final method = message['method'];
+
+    if (method == 'textDocument/didOpen') {
+      final params = message['params'];
+      final document = params is Map ? params['textDocument'] : null;
+      final uri = document is Map ? document['uri']?.toString() : null;
+
+      if (uri == _documentUri.toString()) {
+        _didOpenObserved = true;
+
+        unawaited(
+          NativeLspLogger.info(
+            'test_screen.did_open.observed',
+            details: 'uri=$uri; '
+                'message=${_shortJson(message)}',
+          ),
+        );
+      }
     }
 
-    setState(() {
-      _testingLog = true;
-      _logTestResult = 'Testando a escrita pelo aplicativo...';
-      _logTestSucceeded = null;
-    });
+    unawaited(
+      NativeLspLogger.info(
+        'lsp.client.message',
+        details: 'method=${method ?? "(response)"}; '
+            'id=${message['id'] ?? "(notification)"}; '
+            'params=${_shortJson(message['params'])}',
+      ),
+    );
+  }
+
+  String _shortJson(Object? value, {int maxLength = 1800}) {
+    String result;
 
     try {
-      final success = await NativeLspLogger.testWrite();
-
-      if (_disposed) {
-        return;
-      }
-
-      if (success) {
-        final file = File(NativeLspLogger.logPath);
-        final exists = await file.exists();
-
-        if (_disposed) {
-          return;
-        }
-
-        if (exists) {
-          final length = await file.length();
-
-          setState(() {
-            _logTestSucceeded = true;
-            _logTestResult =
-                'Gravacao confirmada.\n'
-                'Arquivo: ${NativeLspLogger.logPath}\n'
-                'Tamanho atual: $length bytes';
-          });
-        } else {
-          setState(() {
-            _logTestSucceeded = false;
-            _logTestResult =
-                'O logger informou sucesso, mas o arquivo nao foi '
-                'encontrado.\nCaminho esperado: ${NativeLspLogger.logPath}';
-          });
-        }
-      } else {
-        setState(() {
-          _logTestSucceeded = false;
-          _logTestResult =
-              'A gravacao falhou.\n'
-              'Caminho: ${NativeLspLogger.logPath}\n'
-              'Erro: ${NativeLspLogger.lastWriteError ?? "Erro nao informado."}';
-        });
-      }
-    } catch (error, stackTrace) {
-      if (!_disposed) {
-        setState(() {
-          _logTestSucceeded = false;
-          _logTestResult =
-              'Excecao durante o teste de gravacao.\n'
-              'Caminho: ${NativeLspLogger.logPath}\n'
-              'Erro: $error\n$stackTrace';
-        });
-      }
-    } finally {
-      if (!_disposed) {
-        setState(() {
-          _testingLog = false;
-        });
-      }
+      result = jsonEncode(value);
+    } catch (_) {
+      result = value.toString();
     }
+
+    if (result.length <= maxLength) return result;
+
+    return '${result.substring(0, maxLength)}...';
   }
 
   Future<void> _connect() async {
-    if (_disposed || _connecting || _connected) {
-      return;
-    }
+    if (_disposed || _connecting || _connected) return;
 
     final controller = _controller;
 
-    if (!_editorReady || controller == null) {
-      _showStatus(
-        'Aguarde o Monaco terminar de inicializar.',
-      );
+    if (!_editorReady || !_documentReady || controller == null) {
+      _showStatus('Aguarde o arquivo real terminar de carregar.');
       return;
     }
 
     setState(() {
       _connecting = true;
       _lastError = null;
-      _status = 'Iniciando Dart Analysis Server no Ubuntu...';
+      _status = 'Iniciando Dart Analysis Server...';
     });
 
     await NativeLspLogger.info(
       'test_screen.connect.begin',
-      details: 'projectPath=${widget.projectPath}',
+      details: 'projectPath=${widget.projectPath}; '
+          'documentUri=$_documentUri',
     );
 
     try {
-      final transport =
+      final rawTransport =
           await NativeLspTransportService.createTransport(
         projectPath: widget.projectPath,
       );
 
       if (_disposed) {
-        await transport.onClose?.call();
+        await rawTransport.onClose?.call();
         return;
       }
 
-      setState(() {
-        _status = 'Processo iniciado. Negociando protocolo LSP...';
-      });
+      final transport = _instrumentTransport(rawTransport);
+
+      // O cliente LSP nativo e o servidor sao conectados primeiro.
+      // O documento sera reaberto depois da conexao se o didOpen
+      // automatico nao tiver sido enviado.
+      _didOpenObserved = false;
 
       final connection = await controller.connectLanguageServer(
         id: _connectionId,
@@ -226,14 +358,70 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
 
       _connection = connection;
 
-      setState(() {
-        _connected = true;
-        _status = 'Conectado ao Dart Analysis Server.';
-      });
-
       await NativeLspLogger.info(
         'test_screen.connect.success',
-        details: 'connectionId=$_connectionId',
+        details: 'connectionId=$_connectionId; '
+            'connectionState=${connection.state.status}',
+      );
+
+      // Aguarda o cliente nativo abrir o documento existente.
+      await Future<void>.delayed(_didOpenTimeout);
+
+      if (_disposed) return;
+
+      if (!_didOpenObserved) {
+        await NativeLspLogger.warning(
+          'test_screen.did_open.missing',
+          details: 'O cliente nativo nao enviou didOpen para '
+              '$_documentUri. Tentando reabrir o modelo apos conectar.',
+        );
+
+        await _reopenDocumentAfterConnection();
+
+        // O evento didOpen e observado no transporte instrumentado.
+        await Future<void>.delayed(_didOpenTimeout);
+      }
+
+      if (_disposed) return;
+
+      if (_didOpenObserved) {
+        _manualDocumentSync = false;
+
+        await NativeLspLogger.info(
+          'test_screen.did_open.native.success',
+          details: 'O cliente nativo abriu o documento: $_documentUri',
+        );
+
+        _showStatus(
+          'Conectado. Documento aberto pelo cliente nativo do Monaco.',
+        );
+      } else {
+        // Ultimo recurso para investigar se o cliente nao emite didOpen.
+        await NativeLspLogger.warning(
+          'test_screen.did_open.native.failed',
+          details: 'O didOpen automatico continua ausente apos '
+              'reabrir o documento. Ativando sincronizacao manual.',
+        );
+
+        await _sendDidOpen();
+        _manualDocumentSync = true;
+
+        _showStatus(
+          'Conectado. Documento aberto manualmente no servidor.',
+        );
+      }
+
+      if (mounted && !_disposed) {
+        setState(() {
+          _connected = true;
+        });
+      }
+
+      await NativeLspLogger.info(
+        'test_screen.connect.ready',
+        details: 'didOpenObserved=$_didOpenObserved; '
+            'manualDocumentSync=$_manualDocumentSync; '
+            'connectionState=${connection.state.status}',
       );
     } catch (error, stackTrace) {
       await NativeLspLogger.error(
@@ -242,7 +430,7 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
         stackTrace: stackTrace,
       );
 
-      if (!_disposed) {
+      if (!_disposed && mounted) {
         setState(() {
           _connected = false;
           _lastError = error.toString();
@@ -250,7 +438,7 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
         });
       }
     } finally {
-      if (!_disposed) {
+      if (!_disposed && mounted) {
         setState(() {
           _connecting = false;
         });
@@ -258,36 +446,380 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
     }
   }
 
-  Future<void> _disconnect() async {
-    if (_disposed || _connecting) {
-      return;
-    }
-
+  /// Fecha o modelo criado antes da conexao e cria outro com a mesma URI.
+  ///
+  /// Isso permite ao cliente LSP nativo observar a abertura do documento
+  /// quando o modelo passa a existir depois de a conexao estar ativa.
+  Future<void> _reopenDocumentAfterConnection() async {
     final controller = _controller;
+    final oldDocument = _document;
 
-    if (controller == null || !_connected) {
+    if (controller == null || oldDocument == null) {
+      throw StateError('Monaco ou documento nao esta disponivel.');
+    }
+
+    final text = await oldDocument.getText();
+
+    await NativeLspLogger.info(
+      'test_screen.document.reopen.begin',
+      details: 'uri=$_documentUri; '
+          'characters=${text.length}; '
+          'connectionActive=${_connection != null}',
+    );
+
+    await oldDocument.close();
+
+    if (_disposed) return;
+
+    final newDocument = await controller.openDocument(
+      text: text,
+      language: MonacoLanguage.dart,
+      uri: _documentUri,
+    );
+
+    await controller.activateDocument(newDocument);
+
+    if (_disposed) {
+      await newDocument.close();
       return;
     }
+
+    _document = newDocument;
+    _sourceText = text;
+
+    await NativeLspLogger.info(
+      'test_screen.document.reopen.success',
+      details: 'uri=${newDocument.uri}; '
+          'characters=${text.length}; '
+          'didOpenObserved=$_didOpenObserved',
+    );
+  }
+
+  Future<void> _sendDidOpen() async {
+    final connection = _connection;
+    final document = _document;
+
+    if (connection == null || document == null) {
+      throw StateError(
+        'Conexao ou documento ainda nao esta disponivel.',
+      );
+    }
+
+    final content = await document.getText();
+
+    _sourceText = content;
+    _documentVersion = 1;
+
+    await connection.sendNotification(
+      'textDocument/didOpen',
+      {
+        'textDocument': {
+          'uri': _documentUri.toString(),
+          'languageId': 'dart',
+          'version': _documentVersion,
+          'text': content,
+        },
+      },
+    );
+
+    await NativeLspLogger.info(
+      'lsp.client.didOpen.manual',
+      details: 'uri=$_documentUri; '
+          'version=$_documentVersion; '
+          'characters=${content.length}; '
+          'lines=${content.split('\n').length}',
+    );
+
+    await connection.sendNotification(
+      'workspace/didChangeWorkspaceFolders',
+      {
+        'event': {
+          'added': [
+            {
+              'uri': Uri.file(widget.projectPath).toString(),
+              'name': p.basename(widget.projectPath),
+            },
+          ],
+          'removed': <Object?>[],
+        },
+      },
+    );
+
+    await NativeLspLogger.info(
+      'lsp.client.workspace_folders.sent',
+      details: 'workspace=${widget.projectPath}',
+    );
+  }
+
+  void _scheduleDocumentSync() {
+    if (_disposed ||
+        !_connected ||
+        !_manualDocumentSync ||
+        _syncing) {
+      return;
+    }
+
+    _syncTimer?.cancel();
+
+    _syncTimer = Timer(_syncDelay, () {
+      unawaited(_sendDidChange());
+    });
+  }
+
+  Future<void> _sendDidChange() async {
+    final connection = _connection;
+    final document = _document;
+
+    if (_disposed ||
+        connection == null ||
+        document == null ||
+        !_manualDocumentSync ||
+        _syncing) {
+      return;
+    }
+
+    _syncing = true;
+
+    try {
+      final content = await document.getText();
+
+      if (_disposed || content == _sourceText) return;
+
+      _documentVersion++;
+      _sourceText = content;
+
+      await connection.sendNotification(
+        'textDocument/didChange',
+        {
+          'textDocument': {
+            'uri': _documentUri.toString(),
+            'version': _documentVersion,
+          },
+          'contentChanges': [
+            {'text': content},
+          ],
+        },
+      );
+
+      await NativeLspLogger.info(
+        'lsp.client.didChange.manual',
+        details: 'uri=$_documentUri; '
+            'version=$_documentVersion; '
+            'characters=${content.length}; '
+            'lines=${content.split('\n').length}',
+      );
+    } catch (error, stackTrace) {
+      await NativeLspLogger.error(
+        'test_screen.did_change.failed',
+        exception: error,
+        stackTrace: stackTrace,
+      );
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  Future<void> _syncNow() async {
+    if (!_connected || !_manualDocumentSync) {
+      _showStatus(
+        'A sincronizacao manual nao esta ativa. '
+        'Confira o log de didOpen.',
+      );
+      return;
+    }
+
+    await _sendDidChange();
+    _showStatus('Sincronizacao manual do documento executada.');
+  }
+
+  Future<void> _testCompletion() async {
+    if (_disposed || _testing) return;
+
+    final connection = _connection;
+    final controller = _controller;
+    final document = _document;
+
+    if (!_connected ||
+        connection == null ||
+        controller == null ||
+        document == null) {
+      _showStatus('Conecte o LSP antes de testar completion.');
+      return;
+    }
+
+    setState(() {
+      _testing = true;
+      _lastCompletion = null;
+      _lastError = null;
+      _status = 'Sincronizando documento e solicitando completion...';
+    });
+
+    try {
+      if (_manualDocumentSync) {
+        await _sendDidChange();
+      }
+
+      final currentText = await document.getText();
+      final cursor = await controller.getCursorPosition();
+
+      if (cursor == null) {
+        throw StateError(
+          'O Monaco nao retornou a posicao atual do cursor.',
+        );
+      }
+
+      // Monaco inicia linhas e colunas em 1; LSP inicia em 0.
+      final line = cursor.line > 0 ? cursor.line - 1 : 0;
+      final character = cursor.column > 0 ? cursor.column - 1 : 0;
+
+      await NativeLspLogger.info(
+        'test_screen.completion.request',
+        details: 'uri=$_documentUri; '
+            'line=$line; character=$character; '
+            'monacoLine=${cursor.line}; '
+            'monacoColumn=${cursor.column}; '
+            'characters=${currentText.length}; '
+            'manualSync=$_manualDocumentSync',
+      );
+
+      final result = await connection.sendRequest(
+        'textDocument/completion',
+        {
+          'textDocument': {
+            'uri': _documentUri.toString(),
+          },
+          'position': {
+            'line': line,
+            'character': character,
+          },
+        },
+        const Duration(seconds: 30),
+      );
+
+      final resultMap = result is Map
+          ? Map<String, Object?>.from(result)
+          : <String, Object?>{'result': result};
+
+      final itemsValue = resultMap['items'];
+      final items = itemsValue is List ? itemsValue : <Object?>[];
+
+      final labels = <String>[];
+
+      for (final item in items) {
+        if (item is Map && item['label'] != null) {
+          labels.add(item['label'].toString());
+        }
+      }
+
+      final completeResponse = _shortJson(
+        resultMap,
+        maxLength: 3500,
+      );
+
+      await NativeLspLogger.info(
+        'test_screen.completion.response',
+        details: 'uri=$_documentUri; '
+            'items=${items.length}; '
+            'isIncomplete=${resultMap['isIncomplete']}; '
+            'labels=${labels.join(', ')}; '
+            'response=$completeResponse',
+      );
+
+      if (_disposed || !mounted) return;
+
+      setState(() {
+        _lastCompletion = 'Resposta do Dart Analysis Server:\n'
+            'URI: $_documentUri\n'
+            'Posicao LSP: linha $line, coluna $character\n'
+            'Itens: ${items.length}\n'
+            'isIncomplete: ${resultMap['isIncomplete']}\n'
+            'Sugestoes: ${labels.isEmpty ? "(nenhuma)" : labels.join(', ')}'
+            '\n\nJSON:\n$completeResponse';
+
+        _status = items.isEmpty
+            ? 'Completion respondeu, mas retornou zero sugestoes.'
+            : 'Completion retornou ${items.length} sugestoes.';
+      });
+    } catch (error, stackTrace) {
+      await NativeLspLogger.error(
+        'test_screen.completion.failed',
+        exception: error,
+        stackTrace: stackTrace,
+      );
+
+      if (!_disposed && mounted) {
+        setState(() {
+          _lastError = error.toString();
+          _status = 'Falha no teste de completion.';
+        });
+      }
+    } finally {
+      if (!_disposed && mounted) {
+        setState(() {
+          _testing = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _testLogWrite() async {
+    try {
+      final success = await NativeLspLogger.testWrite();
+
+      if (_disposed || !mounted) return;
+
+      final file = File(NativeLspLogger.logPath);
+      final exists = await file.exists();
+      final length = exists ? await file.length() : 0;
+
+      setState(() {
+        _status = success && exists
+            ? 'Gravacao do log confirmada: $length bytes.'
+            : 'Falha ao confirmar a gravacao do log.';
+      });
+
+      await NativeLspLogger.info(
+        'test_screen.log_test',
+        details: 'success=$success; exists=$exists; bytes=$length; '
+            'path=${NativeLspLogger.logPath}; '
+            'lastError=${NativeLspLogger.lastWriteError}',
+      );
+    } catch (error, stackTrace) {
+      await NativeLspLogger.error(
+        'test_screen.log_test.failed',
+        exception: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _disconnect() async {
+    if (_disposed || _connecting) return;
+
+    final connection = _connection;
+    if (connection == null) return;
+
+    _syncTimer?.cancel();
 
     setState(() {
       _status = 'Desconectando do Dart Analysis Server...';
     });
 
     try {
-      await controller.disconnectLanguageServer(_connectionId);
+      await connection.disconnect();
 
       _connection = null;
+      _connected = false;
+      _manualDocumentSync = false;
+      _didOpenObserved = false;
 
-      if (!_disposed) {
+      if (!_disposed && mounted) {
         setState(() {
-          _connected = false;
           _status = 'Desconectado.';
         });
       }
 
-      await NativeLspLogger.info(
-        'test_screen.disconnect.success',
-      );
+      await NativeLspLogger.info('test_screen.disconnect.success');
     } catch (error, stackTrace) {
       await NativeLspLogger.error(
         'test_screen.disconnect.failed',
@@ -295,7 +827,7 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
         stackTrace: stackTrace,
       );
 
-      if (!_disposed) {
+      if (!_disposed && mounted) {
         setState(() {
           _lastError = error.toString();
           _status = 'Erro ao desconectar.';
@@ -305,9 +837,7 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
   }
 
   void _showStatus(String message) {
-    if (_disposed) {
-      return;
-    }
+    if (_disposed || !mounted) return;
 
     setState(() {
       _status = message;
@@ -316,12 +846,6 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final canConnect =
-        _editorReady && !_connecting && !_connected;
-
-    final canDisconnect =
-        _editorReady && !_connecting && _connected;
-
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       localizationsDelegates: const [
@@ -343,26 +867,18 @@ class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
         body: SafeArea(
           child: Column(
             children: [
-              _buildConnectionPanel(
-                canConnect: canConnect,
-                canDisconnect: canDisconnect,
-              ),
+              _buildControlPanel(),
               const Divider(height: 1),
               Expanded(
                 child: MonacoEditor(
-                  initialText: '''
-void main() {
-  print('Teste do Monaco com LSP nativo');
-
-  final message = 'Digite aqui para testar o Dart Analysis Server';
-  print(message);
-}
-''',
+                  initialText: '// Carregando arquivo do projeto...',
                   options: const EditorOptions(
                     language: MonacoLanguage.dart,
                     theme: MonacoTheme.vsDark,
                     fontSize: 14,
                     minimap: MonacoMinimapOptions(enabled: false),
+                    quickSuggestions: true,
+                    suggestOnTriggerCharacters: true,
                   ),
                   onReady: _onEditorReady,
                   onError: (error, stackTrace) {
@@ -374,7 +890,7 @@ void main() {
                       ),
                     );
 
-                    if (!_disposed) {
+                    if (!_disposed && mounted) {
                       setState(() {
                         _lastError = error.toString();
                       });
@@ -382,6 +898,19 @@ void main() {
                   },
                 ),
               ),
+              if (_lastCompletion != null)
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 220),
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  color: Theme.of(context).colorScheme.surfaceContainer,
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      _lastCompletion!,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -389,10 +918,7 @@ void main() {
     );
   }
 
-  Widget _buildConnectionPanel({
-    required bool canConnect,
-    required bool canDisconnect,
-  }) {
+  Widget _buildControlPanel() {
     final Color statusColor;
 
     if (_lastError != null) {
@@ -406,128 +932,97 @@ void main() {
     }
 
     return Padding(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(10),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(
-                Icons.circle,
-                size: 12,
-                color: statusColor,
-              ),
+              Icon(Icons.circle, size: 12, color: statusColor),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   _status,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w500,
-                  ),
+                  style: const TextStyle(fontWeight: FontWeight.w500),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: canConnect ? _connect : null,
-                  icon: _connecting
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                          ),
-                        )
-                      : const Icon(Icons.link),
-                  label: Text(
-                    _connecting ? 'Conectando...' : 'Conectar LSP',
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: canDisconnect ? _disconnect : null,
-                  icon: const Icon(Icons.link_off),
-                  label: const Text('Desconectar'),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: _testingLog ? null : _testLogWrite,
-              icon: _testingLog
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                      ),
-                    )
-                  : const Icon(Icons.description_outlined),
-              label: Text(
-                _testingLog
-                    ? 'Testando gravação...'
-                    : 'Testar gravação do log',
-              ),
-            ),
-          ),
-          if (_logTestResult != null) ...[
-            const SizedBox(height: 8),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  _logTestSucceeded == true
-                      ? Icons.check_circle
-                      : _logTestSucceeded == false
-                          ? Icons.error
-                          : Icons.info_outline,
-                  size: 18,
-                  color: _logTestSucceeded == true
-                      ? Colors.green
-                      : _logTestSucceeded == false
-                          ? Colors.red
-                          : Colors.orange,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: SelectableText(
-                    _logTestResult!,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: _logTestSucceeded == false
-                          ? Colors.red
-                          : null,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-          const SizedBox(height: 6),
+          const SizedBox(height: 5),
           Text(
-            'Workspace: ${widget.projectPath}',
-            style: const TextStyle(
-              fontSize: 12,
-              color: Colors.grey,
+            'Projeto: ${widget.projectPath}',
+            style: const TextStyle(fontSize: 11, color: Colors.grey),
+          ),
+          if (_lastDocumentPath != null)
+            Text(
+              'Arquivo: $_lastDocumentPath',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 10, color: Colors.grey),
             ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              FilledButton.icon(
+                onPressed: _editorReady &&
+                        _documentReady &&
+                        !_connecting &&
+                        !_connected
+                    ? _connect
+                    : null,
+                icon: _connecting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.link),
+                label: Text(
+                  _connecting ? 'Conectando...' : 'Conectar LSP',
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: _connected ? _disconnect : null,
+                icon: const Icon(Icons.link_off),
+                label: const Text('Desconectar'),
+              ),
+              FilledButton.tonalIcon(
+                onPressed: _connected && !_testing
+                    ? _testCompletion
+                    : null,
+                icon: _testing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.search),
+                label: const Text('Testar completion'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _connected && _manualDocumentSync
+                    ? _syncNow
+                    : null,
+                icon: const Icon(Icons.sync),
+                label: const Text('Sincronizar texto'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _testLogWrite,
+                icon: const Icon(Icons.description_outlined),
+                label: const Text('Testar log'),
+              ),
+            ],
           ),
           if (_lastError != null) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             SelectableText(
               _lastError!,
               style: const TextStyle(
                 color: Colors.red,
-                fontSize: 12,
+                fontSize: 11,
               ),
             ),
           ],
