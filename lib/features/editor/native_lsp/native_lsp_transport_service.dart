@@ -11,18 +11,9 @@ import 'native_lsp_logger.dart';
 
 /// Cria um transporte LSP entre o Monaco e o Dart Analysis Server
 /// executado dentro do Ubuntu/PRoot.
-///
-/// Este servico e experimental e independente do DartLspClient existente.
-/// A tela de teste deve ser usada sem iniciar simultaneamente o cliente
-/// LSP antigo para o mesmo workspace.
 class NativeLspTransportService {
   NativeLspTransportService._();
 
-  /// Inicia um processo independente do Dart Analysis Server e devolve
-  /// o transporte que o Monaco utiliza para enviar e receber mensagens LSP.
-  ///
-  /// [projectPath] deve ser um caminho reconhecido pelo Ubuntu, por exemplo:
-  /// /root/projects/teste
   static Future<LspBridgedTransport> createTransport({
     String? projectPath,
   }) async {
@@ -35,9 +26,6 @@ class NativeLspTransportService {
 }
 
 /// Processo PRoot que executa o Dart Analysis Server.
-///
-/// O Monaco fica responsavel pelo handshake LSP, initialize, initialized,
-/// abertura de documentos e chamadas de completion/codeAction.
 class _NativeLspProcess {
   _NativeLspProcess._({
     required Process process,
@@ -115,7 +103,6 @@ class _NativeLspProcess {
   bool _stdoutFinished = false;
   bool _streamClosed = false;
 
-  /// Inicia o processo PRoot usando a mesma estrutura de rootfs do aplicativo.
   static Future<_NativeLspProcess> start({
     String? projectPath,
   }) async {
@@ -138,14 +125,8 @@ class _NativeLspProcess {
       );
     }
 
-    final nativeLibDir = await _getNativeLibraryDir(
-      appDir,
-    );
-
-    final linksDir = await _ensureNativeLinks(
-      appDir,
-      nativeLibDir,
-    );
+    final nativeLibDir = await _getNativeLibraryDir(appDir);
+    final linksDir = await _ensureNativeLinks(appDir, nativeLibDir);
 
     final prootExecutable = p.join(
       linksDir.path,
@@ -159,7 +140,6 @@ class _NativeLspProcess {
     }
 
     const dartExecutable = '/opt/flutter/bin/dart';
-
     const analysisServerSnapshot =
         '/opt/flutter/bin/cache/dart-sdk/bin/snapshots/analysis_server.dart.snapshot';
 
@@ -195,10 +175,7 @@ class _NativeLspProcess {
     );
 
     final tmpDir = Directory(
-      p.join(
-        appDir.path,
-        'tmp',
-      ),
+      p.join(appDir.path, 'tmp'),
     );
 
     if (!await tmpDir.exists()) {
@@ -240,7 +217,7 @@ class _NativeLspProcess {
     final environment = <String, String>{
       'HOME': '/root',
       'PATH': pathValue,
-      'LD_LIBRARY_PATH': '$linksDir.path:$nativeLibDir',
+      'LD_LIBRARY_PATH': '${linksDir.path}:$nativeLibDir',
       'PROOT_LOADER': p.join(
         linksDir.path,
         'libproot_loader.so',
@@ -250,10 +227,6 @@ class _NativeLspProcess {
       'PUB_CACHE': '/root/.pub-cache',
       'PROOT_TMP_DIR': tmpDir.path,
     };
-
-    // Corrige o valor do caminho das bibliotecas nativas.
-    environment['LD_LIBRARY_PATH'] =
-        '${linksDir.path}:$nativeLibDir';
 
     await NativeLspLogger.info(
       'transport.process.launch',
@@ -303,10 +276,7 @@ class _NativeLspProcess {
       return '/data/data/com.flutteride.flutteride/lib';
     }
 
-    return p.join(
-      appDir.path,
-      'bin',
-    );
+    return p.join(appDir.path, 'bin');
   }
 
   static Future<Directory> _ensureNativeLinks(
@@ -314,10 +284,7 @@ class _NativeLspProcess {
     String nativeLibDir,
   ) async {
     final linksDir = Directory(
-      p.join(
-        appDir.path,
-        'lib_links',
-      ),
+      p.join(appDir.path, 'lib_links'),
     );
 
     if (!await linksDir.exists()) {
@@ -333,18 +300,10 @@ class _NativeLspProcess {
     }
 
     await for (final entity in nativeDir.list()) {
-      if (entity is! File) {
-        continue;
-      }
+      if (entity is! File) continue;
 
       final fileName = p.basename(entity.path);
-
-      final link = Link(
-        p.join(
-          linksDir.path,
-          fileName,
-        ),
-      );
+      final link = Link(p.join(linksDir.path, fileName));
 
       try {
         if (await link.exists()) {
@@ -371,26 +330,17 @@ class _NativeLspProcess {
       return '/root/projects';
     }
 
-    final normalizedPath = p.normalize(
-      projectPath.trim(),
-    );
-
-    final normalizedRootfs = p.normalize(
-      rootfsPath,
-    );
+    final normalizedPath = p.normalize(projectPath.trim());
+    final normalizedRootfs = p.normalize(rootfsPath);
 
     if (normalizedPath == normalizedRootfs) {
       return '/';
     }
 
-    final rootfsPrefix =
-        '$normalizedRootfs${p.separator}';
+    final rootfsPrefix = '$normalizedRootfs${p.separator}';
 
     if (normalizedPath.startsWith(rootfsPrefix)) {
-      final relativePath = normalizedPath.substring(
-        rootfsPrefix.length,
-      );
-
+      final relativePath = normalizedPath.substring(rootfsPrefix.length);
       return '/${relativePath.replaceAll('\\', '/')}';
     }
 
@@ -401,26 +351,19 @@ class _NativeLspProcess {
       return normalizedPath.replaceAll('\\', '/');
     }
 
-    // Evita passar caminhos do Android como se fossem caminhos do Ubuntu.
     return '/root/projects';
   }
 
   void _handleStdout(List<int> bytes) {
-    if (_stopped || _streamClosed) {
-      return;
-    }
+    if (_stopped || _streamClosed) return;
 
     try {
       final messages = _decoder.addBytes(bytes);
 
       for (final message in messages) {
-        if (_stopped || _streamClosed) {
-          break;
-        }
+        if (_stopped || _streamClosed) break;
 
         final jsonMessage = jsonEncode(message);
-
-        // Registra somente metadados. Nao grava o conteudo dos documentos.
         final method = message['method'];
         final id = message['id'];
 
@@ -433,21 +376,15 @@ class _NativeLspProcess {
           ),
         );
 
-        _fromServer.add(
-          Map<String, Object?>.from(message),
-        );
+        _fromServer.add(Map<String, Object?>.from(message));
       }
     } catch (error, stackTrace) {
       _fail(error, stackTrace);
     }
   }
 
-  void _handleClientMessage(
-    Map<String, Object?> message,
-  ) {
-    if (_stopped || _streamClosed) {
-      return;
-    }
+  void _handleClientMessage(Map<String, Object?> message) {
+    if (_stopped || _streamClosed) return;
 
     final method = message['method'];
     final id = message['id'];
@@ -460,23 +397,14 @@ class _NativeLspProcess {
       ),
     );
 
-    unawaited(
-      _writeMessage(message),
-    );
+    unawaited(_writeMessage(message));
   }
 
-  Future<void> _writeMessage(
-    Map<String, Object?> message,
-  ) async {
-    if (_stopped) {
-      return;
-    }
+  Future<void> _writeMessage(Map<String, Object?> message) async {
+    if (_stopped) return;
 
     try {
-      final bytes = LspStdioMessageEncoder.encode(
-        message,
-      );
-
+      final bytes = LspStdioMessageEncoder.encode(message);
       _process.stdin.add(bytes);
       await _process.stdin.flush();
     } catch (error, stackTrace) {
@@ -486,10 +414,7 @@ class _NativeLspProcess {
 
   void _handleStdoutDone() {
     _stdoutFinished = true;
-
-    if (_stopped || _streamClosed) {
-      return;
-    }
+    if (_stopped || _streamClosed) return;
 
     unawaited(
       NativeLspLogger.warning(
@@ -498,14 +423,11 @@ class _NativeLspProcess {
       ),
     );
 
-    // O codigo de saida sera verificado pelo listener de exitCode.
     unawaited(_closeStream());
   }
 
   void _handleExitCode(int code) {
-    if (_stopped) {
-      return;
-    }
+    if (_stopped) return;
 
     unawaited(
       NativeLspLogger.info(
@@ -530,13 +452,8 @@ class _NativeLspProcess {
     unawaited(_closeStream());
   }
 
-  void _fail(
-    Object error,
-    StackTrace stackTrace,
-  ) {
-    if (_stopped || _streamClosed) {
-      return;
-    }
+  void _fail(Object error, StackTrace stackTrace) {
+    if (_stopped || _streamClosed) return;
 
     unawaited(
       NativeLspLogger.error(
@@ -547,20 +464,14 @@ class _NativeLspProcess {
     );
 
     if (!_fromServer.isClosed) {
-      _fromServer.addError(
-        error,
-        stackTrace,
-      );
+      _fromServer.addError(error, stackTrace);
     }
 
     unawaited(_closeStream());
   }
 
   Future<void> _closeStream() async {
-    if (_streamClosed) {
-      return;
-    }
-
+    if (_streamClosed) return;
     _streamClosed = true;
 
     if (!_fromServer.isClosed) {
@@ -568,14 +479,8 @@ class _NativeLspProcess {
     }
   }
 
-  /// Encerra o processo e libera os recursos associados.
-  ///
-  /// Pode ser chamado mais de uma vez com seguranca.
   Future<void> stop() async {
-    if (_stopped) {
-      return;
-    }
-
+    if (_stopped) return;
     _stopped = true;
 
     await NativeLspLogger.info(
@@ -600,9 +505,7 @@ class _NativeLspProcess {
     } catch (_) {}
 
     try {
-      await _exitFuture.timeout(
-        const Duration(seconds: 2),
-      );
+      await _exitFuture.timeout(const Duration(seconds: 2));
     } catch (_) {}
 
     await _closeStream();

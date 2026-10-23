@@ -1,3 +1,4 @@
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -5,9 +6,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 /// Logger exclusivo para os testes de comunicacao LSP nativa do Monaco.
-///
-/// O arquivo fica no armazenamento compartilhado do Android para facilitar
-/// a leitura dos diagnosticos sem depender de adb ou logcat.
 class NativeLspLogger {
   NativeLspLogger._();
 
@@ -16,8 +14,9 @@ class NativeLspLogger {
 
   static const String _logFileName = 'flutteride_native_lsp.log';
 
-  static const int _maxLogBytes = 512 * 1024;
+  static const int _maxLogBytes = 8 * 1024 * 1024;
   static const int _maxMessageLength = 4000;
+  static const int _jsonChunkSize = 2500;
 
   static Future<void> _queue = Future<void>.value();
 
@@ -28,18 +27,14 @@ class NativeLspLogger {
 
   static String get logPath => '$_logDirectory/$_logFileName';
 
-  /// Ultimo erro ocorrido durante uma tentativa de gravacao.
   static String? get lastWriteError => _lastWriteError;
 
-  /// Indica se a ultima tentativa de gravacao terminou com sucesso.
   static bool get lastWriteSucceeded => _lastWriteSucceeded;
 
-  /// Ativa ou desativa novos registros.
   static void setEnabled(bool enabled) {
     _enabled = enabled;
   }
 
-  /// Registra um evento informativo.
   static Future<void> info(
     String event, {
     Object? details,
@@ -47,7 +42,6 @@ class NativeLspLogger {
     return log('INFO', event, details: details);
   }
 
-  /// Registra um aviso.
   static Future<void> warning(
     String event, {
     Object? details,
@@ -55,7 +49,6 @@ class NativeLspLogger {
     return log('WARN', event, details: details);
   }
 
-  /// Registra uma falha.
   static Future<void> error(
     String event, {
     Object? details,
@@ -69,16 +62,12 @@ class NativeLspLogger {
     }
 
     if (exception != null) {
-      if (buffer.isNotEmpty) {
-        buffer.write(' | ');
-      }
+      if (buffer.isNotEmpty) buffer.write(' | ');
       buffer.write('exception=$exception');
     }
 
     if (stackTrace != null) {
-      if (buffer.isNotEmpty) {
-        buffer.write('\n');
-      }
+      if (buffer.isNotEmpty) buffer.write('\n');
       buffer.write(stackTrace);
     }
 
@@ -89,18 +78,53 @@ class NativeLspLogger {
     );
   }
 
-  /// Adiciona um registro ao arquivo.
+  /// Grava um objeto JSON completo em partes numeradas.
   ///
-  /// As escritas sao serializadas. Uma falha de gravacao nao interrompe
-  /// o funcionamento do editor, mas fica disponivel para diagnostico.
+  /// Para reconstruir o JSON, concatenar os campos data= dos eventos
+  /// [event].chunk em ordem crescente de part.
+  static Future<void> jsonDump(
+    String event,
+    Object? value,
+  ) async {
+    if (!_enabled) return;
+
+    final encoded = jsonEncode(value);
+
+    final totalParts = encoded.isEmpty
+        ? 1
+        : (encoded.length + _jsonChunkSize - 1) ~/ _jsonChunkSize;
+
+    await info(
+      '$event.begin',
+      details: 'characters=${encoded.length}; parts=$totalParts',
+    );
+
+    for (var index = 0; index < totalParts; index++) {
+      final start = index * _jsonChunkSize;
+      final end = (start + _jsonChunkSize < encoded.length)
+          ? start + _jsonChunkSize
+          : encoded.length;
+
+      final chunk = encoded.substring(start, end);
+
+      await info(
+        '$event.chunk',
+        details: 'part=${index + 1}/$totalParts; data=$chunk',
+      );
+    }
+
+    await info(
+      '$event.end',
+      details: 'characters=${encoded.length}; parts=$totalParts',
+    );
+  }
+
   static Future<void> log(
     String level,
     String event, {
     Object? details,
   }) {
-    if (!_enabled) {
-      return Future<void>.value();
-    }
+    if (!_enabled) return Future<void>.value();
 
     final timestamp = DateTime.now().toIso8601String();
     final safeEvent = _singleLine(event);
@@ -118,11 +142,8 @@ class NativeLspLogger {
         _lastWriteError = null;
       } catch (error, stackTrace) {
         _lastWriteSucceeded = false;
-        _lastWriteError =
-            '${error.runtimeType}: $error\n$stackTrace';
+        _lastWriteError = '${error.runtimeType}: $error\n$stackTrace';
 
-        // Fallback de diagnostico. A tela de teste podera consultar
-        // lastWriteError e apresentar a falha diretamente ao usuario.
         debugPrint(
           '[NativeLspLogger] Falha ao gravar em $logPath: '
           '$_lastWriteError',
@@ -133,9 +154,6 @@ class NativeLspLogger {
     return _queue;
   }
 
-  /// Tenta gravar um evento de diagnostico imediatamente.
-  ///
-  /// Depois do await, consulte lastWriteSucceeded e lastWriteError.
   static Future<bool> testWrite() async {
     await info(
       'logger.write_test',
@@ -157,7 +175,7 @@ class NativeLspLogger {
     if (await file.exists()) {
       final length = await file.length();
 
-      if (length >= _maxLogBytes) {
+      if (length + utf8.encode(line).length > _maxLogBytes) {
         await file.writeAsString(
           '[${DateTime.now().toIso8601String()}] [INFO] '
           'Log reiniciado: limite de tamanho atingido.\n',
@@ -183,9 +201,7 @@ class NativeLspLogger {
   }
 
   static String _limit(String value) {
-    if (value.length <= _maxMessageLength) {
-      return value;
-    }
+    if (value.length <= _maxMessageLength) return value;
 
     return '${value.substring(0, _maxMessageLength)}... [truncated]';
   }

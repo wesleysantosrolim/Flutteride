@@ -1,0 +1,1092 @@
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_monaco/flutter_monaco.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
+import '../../native_lsp/native_lsp_logger.dart';
+import '../../native_lsp/native_lsp_transport_service.dart';
+
+/// Tela para integracao do Monaco Editor com Dart Analysis Server via LSP.
+class NativeLspTestScreen extends StatefulWidget {
+  const NativeLspTestScreen({
+    super.key,
+    this.projectPath = '/root/projects/casa',
+  });
+
+  final String projectPath;
+
+  @override
+  State<NativeLspTestScreen> createState() => _NativeLspTestScreenState();
+}
+
+class _NativeLspTestScreenState extends State<NativeLspTestScreen> {
+  static const String _connectionId = 'native-dart-lsp-test';
+  static const Duration _syncDelay = Duration(milliseconds: 250);
+
+  MonacoController? _controller;
+  MonacoDocument? _document;
+  LanguageServerConnection? _connection;
+
+  StreamSubscription<MonacoContentChanged>? _contentSubscription;
+  StreamSubscription<Map<String, Object?>>? _completionDeliverySubscription;
+  Timer? _syncTimer;
+
+  late final Uri _documentUri = Uri.file(
+    '${widget.projectPath}/lib/app.dart',
+  );
+
+  String _sourceText = '';
+  String _status = 'Inicializando Monaco...';
+  String? _lastError;
+  String? _lastCompletion;
+  String? _lastDocumentPath;
+
+  bool _editorReady = false;
+  bool _documentReady = false;
+  bool _connecting = false;
+  bool _connected = false;
+  bool _disposed = false;
+  bool _testing = false;
+  bool _syncing = false;
+  bool _didOpenObserved = false;
+  bool _manualDocumentSync = false;
+
+  int _documentVersion = 1;
+
+  @override
+  void initState() {
+    super.initState();
+
+    unawaited(
+      NativeLspLogger.info(
+        'test_screen.open',
+        details: 'projectPath=${widget.projectPath}; uri=$_documentUri',
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _syncTimer?.cancel();
+
+    unawaited(_contentSubscription?.cancel() ?? Future<void>.value());
+    unawaited(
+      _completionDeliverySubscription?.cancel() ?? Future<void>.value(),
+    );
+
+    final connection = _connection;
+    _connection = null;
+
+    if (connection != null) {
+      unawaited(
+        connection.disconnect().catchError((Object error) {
+          NativeLspLogger.warning(
+            'test_screen.disconnect_on_dispose.failed',
+            details: error,
+          );
+        }),
+      );
+    }
+
+    unawaited(NativeLspLogger.info('test_screen.close'));
+    super.dispose();
+  }
+
+  Future<String> _loadProjectFile() async {
+    final appDirectory = await getApplicationSupportDirectory();
+
+    final relativeProjectPath = widget.projectPath
+        .replaceFirst(RegExp(r'^/+'), '')
+        .split('/');
+
+    final hostProjectDirectory = p.joinAll([
+      appDirectory.path,
+      'ubuntu_rootfs',
+      ...relativeProjectPath,
+    ]);
+
+    final hostFilePath = p.join(
+      hostProjectDirectory,
+      'lib',
+      'app.dart',
+    );
+
+    final file = File(hostFilePath);
+
+    await NativeLspLogger.info(
+      'test_screen.file.load.begin',
+      details:
+          'guestPath=${widget.projectPath}/lib/app.dart; '
+          'hostPath=$hostFilePath',
+    );
+
+    if (!await file.exists()) {
+      throw FileSystemException(
+        'O arquivo lib/app.dart nao foi encontrado no rootfs.',
+        hostFilePath,
+      );
+    }
+
+    final text = await file.readAsString(encoding: utf8);
+
+    if (text.trim().isEmpty) {
+      throw FileSystemException(
+        'O arquivo lib/app.dart esta vazio.',
+        hostFilePath,
+      );
+    }
+
+    _lastDocumentPath = hostFilePath;
+
+    await NativeLspLogger.info(
+      'test_screen.file.load.success',
+      details:
+          'path=$hostFilePath; '
+          'characters=${text.length}; '
+          'lines=${text.split('\n').length}',
+    );
+
+    return text;
+  }
+
+  /// Chamado quando o Monaco estiver pronto.
+  ///
+  /// A conexao LSP e iniciada automaticamente. O arquivo do projeto
+  /// so sera carregado e aberto depois que a conexao for inicializada.
+  Future<void> _onEditorReady(MonacoController controller) async {
+    if (_disposed) return;
+
+    _controller = controller;
+
+    if (mounted) {
+      setState(() {
+        _editorReady = true;
+        _status = 'Monaco pronto. Iniciando Dart Analysis Server...';
+      });
+    }
+
+    await NativeLspLogger.info('test_screen.monaco.ready');
+
+    if (_disposed) return;
+
+    unawaited(_connect());
+  }
+
+  /// Instrumenta o transporte sem modificar mensagens LSP.
+  ///
+  /// As respostas de completion precisam chegar intactas ao cliente Monaco.
+  /// Tambem nao respondemos manualmente a client/registerCapability:
+  /// essa solicitacao deve ser processada pelo cliente LSP do Monaco.
+  LspBridgedTransport _instrumentTransport(
+    LspBridgedTransport original,
+  ) {
+    return LspBridgedTransport(
+      fromServer: original.fromServer.map((message) {
+        final method = message['method'];
+        final id = message['id'];
+
+        final hasResult = message.containsKey('result');
+        final hasError = message.containsKey('error');
+        final hasParams = message.containsKey('params');
+
+        final Object? loggedPayload = <String, Object?>{
+          if (hasParams) 'params': message['params'],
+          if (hasResult) 'result': message['result'],
+          if (hasError) 'error': message['error'],
+        };
+
+        String eventName = 'lsp.server.message';
+
+        if (method == 'client/registerCapability') {
+          eventName = 'lsp.server.register_capability';
+        } else if (method == 'textDocument/publishDiagnostics') {
+          eventName = 'lsp.server.publish_diagnostics';
+        } else if (method == null && hasResult) {
+          eventName = 'lsp.server.response';
+        } else if (method == null && hasError) {
+          eventName = 'lsp.server.response_error';
+        }
+
+        unawaited(
+          NativeLspLogger.info(
+            eventName,
+            details:
+                'method=${method ?? "(response)"}; '
+                'id=${id ?? "(notification)"}; '
+                'payload=${_shortJson(loggedPayload, maxLength: 4000)}',
+          ),
+        );
+
+        // Nao alterar a mensagem recebida.
+        // O cliente Monaco precisa receber a resposta LSP original,
+        // incluindo textEdit, filterText, sortText, insertTextFormat,
+        // additionalTextEdits e os demais campos de CompletionItem.
+        //
+        // Nao responder manualmente a client/registerCapability.
+        return message;
+      }),
+      toServer: (message) {
+        _inspectClientMessage(message);
+        original.toServer(message);
+      },
+      onClose: original.onClose,
+    );
+  }
+
+  void _inspectClientMessage(Map<String, Object?> message) {
+    final method = message['method'];
+    final id = message['id'];
+
+    if (method == 'textDocument/didOpen') {
+      final params = message['params'];
+      final document = params is Map ? params['textDocument'] : null;
+      final uri = document is Map
+          ? document['uri']?.toString()
+          : null;
+
+      if (uri == _documentUri.toString()) {
+        _didOpenObserved = true;
+
+        unawaited(
+          NativeLspLogger.info(
+            'lsp.client.did_open_observed',
+            details: 'uri=$uri',
+          ),
+        );
+      }
+    }
+
+    final responseError = message['error'];
+    final isResponse = method == null && message.containsKey('id');
+
+    final Object? loggedPayload = isResponse
+        ? <String, Object?>{
+            if (message.containsKey('result')) 'result': message['result'],
+            if (responseError != null) 'error': responseError,
+          }
+        : message['params'];
+
+    String eventName = 'lsp.client.message';
+
+    if (method == 'textDocument/completion') {
+      eventName = 'lsp.client.completion_request';
+    } else if (method == 'textDocument/didOpen') {
+      eventName = 'lsp.client.did_open';
+    } else if (method == 'textDocument/didChange') {
+      eventName = 'lsp.client.did_change';
+    } else if (method == 'initialize') {
+      eventName = 'lsp.client.initialize';
+    } else if (method == 'initialized') {
+      eventName = 'lsp.client.initialized';
+    } else if (isResponse && responseError != null) {
+      eventName = 'lsp.client.response_error';
+    } else if (isResponse) {
+      eventName = 'lsp.client.response';
+    }
+
+    unawaited(
+      NativeLspLogger.info(
+        eventName,
+        details:
+            'method=${method ?? "(response)"}; '
+            'id=${id ?? "(notification)"}; '
+            'payload=${_shortJson(loggedPayload, maxLength: 4000)}',
+      ),
+    );
+  }
+
+  String _shortJson(
+    Object? value, {
+    int maxLength = 1800,
+  }) {
+    String result;
+
+    try {
+      result = jsonEncode(value);
+    } catch (_) {
+      result = value.toString();
+    }
+
+    if (result.length <= maxLength) return result;
+
+    return '${result.substring(0, maxLength)}...';
+  }
+
+  /// Conecta primeiro ao servidor e somente depois abre lib/app.dart.
+  Future<void> _connect() async {
+    if (_disposed || _connecting || _connected) return;
+
+    final controller = _controller;
+
+    if (!_editorReady || controller == null) {
+      _showStatus('Aguarde o Monaco ficar pronto.');
+      return;
+    }
+
+    setState(() {
+      _connecting = true;
+      _lastError = null;
+      _lastCompletion = null;
+      _status = 'Iniciando Dart Analysis Server...';
+    });
+
+    try {
+      await NativeLspLogger.info(
+        'test_screen.connect.begin',
+        details:
+            'projectPath=${widget.projectPath}; '
+            'uri=$_documentUri',
+      );
+
+      // ETAPA 1: iniciar o transporte e conectar o cliente LSP.
+      final rawTransport =
+          await NativeLspTransportService.createTransport(
+        projectPath: widget.projectPath,
+      );
+
+      if (_disposed) {
+        await rawTransport.onClose?.call();
+        return;
+      }
+
+      final transport = _instrumentTransport(rawTransport);
+      _didOpenObserved = false;
+
+      final connection = await controller.connectLanguageServer(
+        id: _connectionId,
+        transport: transport,
+        initializationTimeout: const Duration(seconds: 45),
+      );
+
+      if (_disposed) {
+        await connection.disconnect();
+        return;
+      }
+
+      _connection = connection;
+
+      await NativeLspLogger.info(
+        'test_screen.connect.server_initialized',
+        details:
+            'connectionId=$_connectionId; '
+            'projectPath=${widget.projectPath}',
+      );
+
+      // Escutar os objetos completos que o provider de completion
+      // eventualmente entregar ao Monaco.
+      _completionDeliverySubscription =
+          connection.completionDeliveries.listen(
+        (delivery) {
+          unawaited(
+            NativeLspLogger.jsonDump(
+              'monaco.completion.delivery',
+              delivery,
+            ),
+          );
+
+          if (_disposed || !mounted) return;
+
+          final result = delivery['result'];
+          final count = delivery['suggestionCount'];
+
+          setState(() {
+            _lastCompletion =
+                'Resultado efetivamente entregue ao Monaco:\n'
+                'URI: ${delivery['uri'] ?? '(desconhecida)'}\n'
+                'Posicao: ${delivery['position'] ?? '(desconhecida)'}\n'
+                'Quantidade: ${count ?? '(nao informada)'}\n'
+                'Resultado JSON:\n'
+                '${_shortJson(result, maxLength: 12000)}';
+
+            _status = delivery['error'] != null
+                ? 'O provider de completion apresentou erro.'
+                : 'Resultado do provider registrado no log.';
+          });
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          unawaited(
+            NativeLspLogger.error(
+              'monaco.completion.delivery_stream.error',
+              exception: error,
+              stackTrace: stackTrace,
+            ),
+          );
+        },
+      );
+
+      if (mounted && !_disposed) {
+        setState(() {
+          _status = 'Servidor conectado. Carregando lib/app.dart...';
+        });
+      }
+
+      // ETAPA 2: carregar o arquivo somente depois da conexao LSP.
+      await NativeLspLogger.info(
+        'test_screen.file.load.after_connect.begin',
+        details:
+            'connectionId=$_connectionId; '
+            'guestPath=${widget.projectPath}/lib/app.dart',
+      );
+
+      final text = await _loadProjectFile();
+
+      if (_disposed) return;
+
+      // ETAPA 3: abrir e ativar o documento no Monaco.
+      final document = await controller.openDocument(
+        text: text,
+        language: MonacoLanguage.dart,
+        uri: _documentUri,
+      );
+
+      await controller.activateDocument(document);
+
+      if (_disposed) return;
+
+      _document = document;
+      _sourceText = text;
+      _documentVersion = 1;
+
+      await _contentSubscription?.cancel();
+
+      _contentSubscription = controller.onContentChanged.listen(
+        (_) => _scheduleDocumentSync(),
+        onError: (Object error, StackTrace stackTrace) {
+          unawaited(
+            NativeLspLogger.error(
+              'test_screen.content_stream.error',
+              exception: error,
+              stackTrace: stackTrace,
+            ),
+          );
+        },
+      );
+
+      if (mounted) {
+        setState(() {
+          _documentReady = true;
+          _status =
+              'Arquivo carregado. Sincronizando com Dart Analysis Server...';
+        });
+      }
+
+      await NativeLspLogger.info(
+        'test_screen.file.open.after_connect.success',
+        details:
+            'uri=$_documentUri; '
+            'characters=${text.length}; '
+            'lines=${text.split('\n').length}',
+      );
+
+      // ETAPA 4: sincronizar o documento com o servidor.
+      _manualDocumentSync = true;
+
+      await _sendDidOpen();
+
+      if (_disposed) return;
+
+      if (mounted) {
+        setState(() {
+          _connected = true;
+          _documentReady = true;
+          _status =
+              'Conectado. lib/app.dart aberto e sincronizado.';
+        });
+      }
+
+      await NativeLspLogger.info(
+        'test_screen.connect.success',
+        details:
+            'projectPath=${widget.projectPath}; '
+            'uri=$_documentUri; '
+            'didOpenObserved=$_didOpenObserved; '
+            'documentReady=$_documentReady',
+      );
+    } catch (error, stackTrace) {
+      await NativeLspLogger.error(
+        'test_screen.connect.failed',
+        exception: error,
+        stackTrace: stackTrace,
+      );
+
+      final failedConnection = _connection;
+      _connection = null;
+
+      _manualDocumentSync = false;
+      _connected = false;
+      _documentReady = false;
+
+      _syncTimer?.cancel();
+
+      await _contentSubscription?.cancel();
+      _contentSubscription = null;
+
+      await _completionDeliverySubscription?.cancel();
+      _completionDeliverySubscription = null;
+
+      if (failedConnection != null) {
+        try {
+          await failedConnection.disconnect();
+        } catch (disconnectError, disconnectStackTrace) {
+          await NativeLspLogger.error(
+            'test_screen.connect.cleanup.failed',
+            exception: disconnectError,
+            stackTrace: disconnectStackTrace,
+          );
+        }
+      }
+
+      if (!_disposed && mounted) {
+        setState(() {
+          _connected = false;
+          _documentReady = false;
+          _lastError = error.toString();
+          _status = 'Falha ao conectar ou abrir lib/app.dart.';
+        });
+      }
+    } finally {
+      if (!_disposed && mounted) {
+        setState(() {
+          _connecting = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _sendDidOpen() async {
+    final connection = _connection;
+    final document = _document;
+
+    if (connection == null || document == null) return;
+
+    final content = await document.getText();
+
+    _sourceText = content;
+    _documentVersion = 1;
+
+    await connection.sendNotification(
+      'textDocument/didOpen',
+      {
+        'textDocument': {
+          'uri': _documentUri.toString(),
+          'languageId': 'dart',
+          'version': _documentVersion,
+          'text': content,
+        },
+      },
+    );
+
+    await connection.sendNotification(
+      'workspace/didChangeWorkspaceFolders',
+      {
+        'event': {
+          'added': [
+            {
+              'uri': Uri.file(widget.projectPath).toString(),
+              'name': p.basename(widget.projectPath),
+            },
+          ],
+          'removed': <Object?>[],
+        },
+      },
+    );
+
+    await NativeLspLogger.info(
+      'test_screen.did_open.sent',
+      details:
+          'uri=$_documentUri; '
+          'version=$_documentVersion; '
+          'characters=${content.length}',
+    );
+  }
+
+  void _scheduleDocumentSync() {
+    if (_disposed ||
+        !_connected ||
+        !_manualDocumentSync ||
+        _syncing) {
+      return;
+    }
+
+    _syncTimer?.cancel();
+
+    _syncTimer = Timer(_syncDelay, () {
+      unawaited(_sendDidChange());
+    });
+  }
+
+  Future<void> _sendDidChange() async {
+    final connection = _connection;
+    final document = _document;
+
+    if (_disposed ||
+        connection == null ||
+        document == null ||
+        !_manualDocumentSync ||
+        _syncing) {
+      return;
+    }
+
+    _syncing = true;
+
+    try {
+      final content = await document.getText();
+
+      if (_disposed || content == _sourceText) return;
+
+      _documentVersion++;
+      _sourceText = content;
+
+      await connection.sendNotification(
+        'textDocument/didChange',
+        {
+          'textDocument': {
+            'uri': _documentUri.toString(),
+            'version': _documentVersion,
+          },
+          'contentChanges': [
+            {'text': content},
+          ],
+        },
+      );
+
+      await NativeLspLogger.info(
+        'test_screen.did_change.sent',
+        details:
+            'uri=$_documentUri; '
+            'version=$_documentVersion; '
+            'characters=${content.length}',
+      );
+    } catch (error, stackTrace) {
+      await NativeLspLogger.error(
+        'test_screen.did_change.failed',
+        exception: error,
+        stackTrace: stackTrace,
+      );
+    } finally {
+      _syncing = false;
+    }
+  }
+
+  Future<void> _syncNow() async {
+    if (!_connected || !_manualDocumentSync) {
+      _showStatus('A sincronizacao manual nao esta ativa.');
+      return;
+    }
+
+    await _sendDidChange();
+
+    _showStatus('Sincronizacao manual do documento executada.');
+  }
+
+  Future<void> _testCompletion() async {
+    if (_disposed || _testing) return;
+
+    final connection = _connection;
+    final controller = _controller;
+    final document = _document;
+
+    if (!_connected ||
+        connection == null ||
+        controller == null ||
+        document == null) {
+      _showStatus('Conecte o LSP antes de testar completion.');
+      return;
+    }
+
+    setState(() {
+      _testing = true;
+      _lastCompletion = null;
+      _lastError = null;
+      _status = 'Sincronizando documento e solicitando completion...';
+    });
+
+    try {
+      if (_manualDocumentSync) {
+        await _sendDidChange();
+      }
+
+      final cursor = await controller.getCursorPosition();
+
+      if (cursor == null) {
+        throw StateError(
+          'O Monaco nao retornou a posicao atual do cursor.',
+        );
+      }
+
+      final line = cursor.line > 0 ? cursor.line - 1 : 0;
+      final character = cursor.column > 0 ? cursor.column - 1 : 0;
+
+      await NativeLspLogger.info(
+        'test_screen.completion.request.begin',
+        details:
+            'uri=$_documentUri; '
+            'line=$line; '
+            'character=$character',
+      );
+
+      final dynamic response = await connection.sendRequest(
+        'textDocument/completion',
+        {
+          'textDocument': {
+            'uri': _documentUri.toString(),
+          },
+          'position': {
+            'line': line,
+            'character': character,
+          },
+          'context': {
+            'triggerKind': 1,
+          },
+        },
+        const Duration(seconds: 30),
+      );
+
+      List<dynamic> items = <dynamic>[];
+
+      if (response is Map && response['items'] is List) {
+        items = List<dynamic>.from(response['items'] as List);
+      } else if (response is List) {
+        items = List<dynamic>.from(response);
+      }
+
+      final labels = <String>[];
+
+      for (final value in items) {
+        if (value is Map && value['label'] != null) {
+          labels.add(value['label'].toString());
+        }
+      }
+
+      await NativeLspLogger.info(
+        'test_screen.completion.response',
+        details:
+            'uri=$_documentUri; '
+            'line=$line; '
+            'character=$character; '
+            'items=${items.length}; '
+            'labels=${_shortJson(labels.take(30).toList(), maxLength: 2000)}',
+      );
+
+      // Aciona o menu de sugestoes do Monaco para o teste visual.
+      // A resposta LSP nao e convertida nem alterada por esta tela.
+      await controller.executeAction(
+        const MonacoAction('editor.action.triggerSuggest'),
+      );
+
+      if (_disposed || !mounted) return;
+
+      setState(() {
+        _lastCompletion =
+            'Resposta do Dart Analysis Server:\n'
+            'URI: $_documentUri\n'
+            'Posicao: linha $line, coluna $character\n'
+            'Itens: ${items.length}\n'
+            'Sugestoes: ${labels.take(30).join(', ')}';
+
+        _status = items.isEmpty
+            ? 'Completion respondeu, mas retornou zero sugestoes.'
+            : 'Completion retornou ${items.length} sugestoes (popup acionado).';
+      });
+    } catch (error, stackTrace) {
+      await NativeLspLogger.error(
+        'test_screen.completion.failed',
+        exception: error,
+        stackTrace: stackTrace,
+      );
+
+      if (!_disposed && mounted) {
+        setState(() {
+          _lastError = error.toString();
+          _status = 'Falha no teste de completion.';
+        });
+      }
+    } finally {
+      if (!_disposed && mounted) {
+        setState(() {
+          _testing = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _testLogWrite() async {
+    try {
+      final success = await NativeLspLogger.testWrite();
+
+      if (_disposed || !mounted) return;
+
+      final file = File(NativeLspLogger.logPath);
+      final exists = await file.exists();
+      final length = exists ? await file.length() : 0;
+
+      setState(() {
+        _status = success && exists
+            ? 'Gravacao do log confirmada: $length bytes.'
+            : 'Falha ao confirmar a gravacao do log.';
+      });
+    } catch (error, stackTrace) {
+      await NativeLspLogger.error(
+        'test_screen.log_test.failed',
+        exception: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<void> _disconnect() async {
+    if (_disposed || _connecting) return;
+
+    final connection = _connection;
+
+    if (connection == null) return;
+
+    _syncTimer?.cancel();
+
+    setState(() {
+      _status = 'Desconectando do Dart Analysis Server...';
+    });
+
+    try {
+      await connection.disconnect();
+
+      _connection = null;
+      _connected = false;
+      _manualDocumentSync = false;
+
+      await NativeLspLogger.info('test_screen.disconnect.success');
+
+      if (!_disposed && mounted) {
+        setState(() {
+          _status = 'Desconectado.';
+        });
+      }
+    } catch (error, stackTrace) {
+      await NativeLspLogger.error(
+        'test_screen.disconnect.failed',
+        exception: error,
+        stackTrace: stackTrace,
+      );
+
+      if (!_disposed && mounted) {
+        setState(() {
+          _lastError = error.toString();
+          _status = 'Erro ao desconectar.';
+        });
+      }
+    }
+  }
+
+  void _showStatus(String message) {
+    if (_disposed || !mounted) return;
+
+    setState(() {
+      _status = message;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [
+        Locale('pt', 'BR'),
+      ],
+      home: Scaffold(
+        appBar: AppBar(
+          title: const Text('Teste LSP nativo'),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ),
+        body: SafeArea(
+          child: Column(
+            children: [
+              _buildControlPanel(),
+              const Divider(height: 1),
+              Expanded(
+                child: MonacoEditor(
+                  initialText: '// Aguardando conexao com Dart Analysis Server...',
+                  options: const EditorOptions(
+                    language: MonacoLanguage.dart,
+                    theme: MonacoTheme.vsDark,
+                    fontSize: 14,
+                    minimap: MonacoMinimapOptions(enabled: false),
+                    quickSuggestions: true,
+                    suggestOnTriggerCharacters: true,
+                  ),
+                  onReady: _onEditorReady,
+                  onError: (error, stackTrace) {
+                    unawaited(
+                      NativeLspLogger.error(
+                        'test_screen.monaco.error',
+                        exception: error,
+                        stackTrace: stackTrace,
+                      ),
+                    );
+
+                    if (!_disposed && mounted) {
+                      setState(() {
+                        _lastError = error.toString();
+                      });
+                    }
+                  },
+                ),
+              ),
+              if (_lastCompletion != null)
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 180),
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  color: Theme.of(context).colorScheme.surfaceContainer,
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      _lastCompletion!,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildControlPanel() {
+    final Color statusColor;
+
+    if (_lastError != null) {
+      statusColor = Colors.red;
+    } else if (_connected) {
+      statusColor = Colors.green;
+    } else if (_connecting) {
+      statusColor = Colors.orange;
+    } else {
+      statusColor = Colors.grey;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.circle,
+                size: 12,
+                color: statusColor,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _status,
+                  style: const TextStyle(fontWeight: FontWeight.w500),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Text(
+            'Projeto: ${widget.projectPath}',
+            style: const TextStyle(
+              fontSize: 11,
+              color: Colors.grey,
+            ),
+          ),
+          if (_lastDocumentPath != null)
+            Text(
+              'Arquivo: $_lastDocumentPath',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 10,
+                color: Colors.grey,
+              ),
+            ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              FilledButton.icon(
+                onPressed: _editorReady && !_connecting && !_connected
+                    ? _connect
+                    : null,
+                icon: _connecting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Icon(Icons.link),
+                label: Text(
+                  _connecting ? 'Conectando...' : 'Conectar LSP',
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: _connected ? _disconnect : null,
+                icon: const Icon(Icons.link_off),
+                label: const Text('Desconectar'),
+              ),
+              FilledButton.tonalIcon(
+                onPressed: _connected && !_testing
+                    ? _testCompletion
+                    : null,
+                icon: _testing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Icon(Icons.search),
+                label: const Text('Testar completion'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _connected && _manualDocumentSync
+                    ? _syncNow
+                    : null,
+                icon: const Icon(Icons.sync),
+                label: const Text('Sincronizar texto'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _testLogWrite,
+                icon: const Icon(Icons.description_outlined),
+                label: const Text('Testar log'),
+              ),
+            ],
+          ),
+          if (_lastError != null) ...[
+            const SizedBox(height: 6),
+            SelectableText(
+              _lastError!,
+              style: const TextStyle(
+                color: Colors.red,
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}

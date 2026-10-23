@@ -1,0 +1,398 @@
+RELATORIO DE INSPECAO DA ENTREGA DE COMPLETIONS
+
+==============================================================================
+ARQUIVO: packages/flutter_monaco/assets/monaco/bridge/lsp.js
+
+---
+0097:                     };
+0098:                   }
+0099: 
+0100:                   // Monaco 0.57.0's MonacoLspClient exposes no dispose() and
+0101:                   // discards the feature DisposableStore it creates in its
+0102:                   // constructor, so a stock client can never unregister its
+0103:                   // providers. This wrapper captures the store and reaches
+0104:                   // into the private fields (_initPromise, _bridge,
+0105:                   // _capabilitiesRegistry, _connection) - all verified against
+0106:                   // the 0.57.0 sources. Kept in this one block so future
+0107:                   // Monaco upgrades have a single place to re-verify.
+0108:                   // Captura de diagnostico do resultado de completion.
+0109:                   let activeCompletionConnectionId = null;
+0110:                   let completionProviderCaptureInstalled = false;
+0111: 
+0112:                   function installCompletionProviderCapture() {
+0113:                     if (completionProviderCaptureInstalled) return;
+0114:                     if (!window.monaco ||
+0115:                         !monaco.languages ||
+0116:                         typeof monaco.languages.registerCompletionItemProvider !== 'function') {
+0117:                       return;
+0118:                     }
+0119: 
+0120:                     const originalRegister =
+0121:                       monaco.languages.registerCompletionItemProvider;
+0122: 
+0123:                     monaco.languages.registerCompletionItemProvider = function (
+0124:                       language,
+0125:                       provider
+0126:                     ) {
+0127:                       const connectionId = activeCompletionConnectionId;
+0128: 
+0129:                       if (!connectionId ||
+0130:                           !provider ||
+0131:                           typeof provider.provideCompletionItems !== 'function') {
+0132:                         return originalRegister.apply(this, arguments);
+0133:                       }
+0134: 
+0135:                       const originalProvide = provider.provideCompletionItems;
+0136:                       const wrappedProvider = Object.assign({}, provider);
+0137: 
+0138:                       wrappedProvider.provideCompletionItems = function (
+0139:                         model,
+0140:                         position,
+0141:                         context,
+0142:                         token
+0143:                       ) {
+0144:                         function report(value) {
+0145:                           try {
+0146:                             const safeResult = JSON.parse(JSON.stringify(value));
+0147:                             const suggestions = Array.isArray(safeResult)
+0148:                               ? safeResult
+0149:                               : safeResult &&
+0150:                                 Array.isArray(safeResult.suggestions)
+0151:                                 ? safeResult.suggestions
+0152:                                 : null;
+0153: 
+0154:                             postMessageToFlutter({
+0155:                               event: 'lspCompletionDelivery',
+0156:                               connectionId: connectionId,
+0157:                               uri: model && model.uri
+0158:                                 ? model.uri.toString()
+0159:                                 : null,
+0160:                               position: position || null,
+0161:                               result: safeResult,
+0162:                               suggestionCount: suggestions
+0163:                                 ? suggestions.length
+0164:                                 : null,
+0165:                             });
+0166:                           } catch (_) {
+0167:                             // O diagnostico nao pode interromper o Monaco.
+0168:                           }
+0169:                           return value;
+0170:                         }
+0171: 
+0172:                         let result;
+0173:                         try {
+0174:                           result = originalProvide.call(
+0175:                             provider,
+0176:                             model,
+0177:                             position,
+0178:                             context,
+0179:                             token
+0180:                           );
+0181:                         } catch (error) {
+0182:                           postMessageToFlutter({
+0183:                             event: 'lspCompletionDelivery',
+0184:                             connectionId: connectionId,
+0185:                             uri: model && model.uri
+0186:                               ? model.uri.toString()
+0187:                               : null,
+0188:                             position: position || null,
+0189:                             error: String(error),
+0190:                           });
+0191:                           throw error;
+0192:                         }
+0193: 
+0194:                         if (result && typeof result.then === 'function') {
+0195:                           return result.then(report, (error) => {
+0196:                             postMessageToFlutter({
+0197:                               event: 'lspCompletionDelivery',
+0198:                               connectionId: connectionId,
+0199:                               uri: model && model.uri
+0200:                                 ? model.uri.toString()
+0201:                                 : null,
+0202:                               position: position || null,
+0203:                               error: String(error),
+0204:                             });
+0205:                             throw error;
+0206:                           });
+0207:                         }
+0208: 
+0209:                         return report(result);
+0210:                       };
+0211: 
+0212:                       return originalRegister.call(
+0213:                         this,
+0214:                         language,
+0215:                         wrappedProvider
+0216:                       );
+0217:                     };
+0218: 
+0219:                     completionProviderCaptureInstalled = true;
+0220:                   }
+0221: 
+0222:                   let FlutterLspClientClass = null;
+0223:                   function getClientClass() {
+0224:                     if (FlutterLspClientClass) return FlutterLspClientClass;
+0225:                     FlutterLspClientClass = class extends monaco.lsp.MonacoLspClient {
+0226:                       // Called from the base constructor, before subclass
+0227:                       // field initializers run - stash on a lazily created
+0228:                       // property instead of a declared field (a declared
+0229:                       // field initializer would overwrite this afterwards).
+0230:                       createFeatures() {
+0231:                         const store = super.createFeatures();
+0232:                         if (!this.__flutterFeatureStores) {
+0233:                           this.__flutterFeatureStores = [];
+0234:                         }
+0235:                         this.__flutterFeatureStores.push(store);
+0236:                         return store;
+0237:                       }
+0238:                       get initialized() { return this._initPromise; }
+0239:                       get lspConnection() { return this._connection; }
+0240:                       dispose() {
+0241:                         for (const store of this.__flutterFeatureStores || []) {
+0242:                           try { store.dispose(); } catch (_) {}
+
+---
+0454:                           entry.transport = await Promise.race([building, abandoned]);
+0455:                           throwIfAbandoned(entry);
+0456:                         }
+0457:                         if (!entry.transport ||
+0458:                             typeof entry.transport.send !== 'function' ||
+0459:                             typeof entry.transport.setListener !== 'function') {
+0460:                           throw new Error(
+0461:                             'LSP transport for "' + id +
+0462:                             '" does not implement IMessageTransport ' +
+0463:                             '(state/send/setListener).');
+0464:                         }
+0465:                         installCompletionProviderCapture();
+0466:                         const previousConnectionId = activeCompletionConnectionId;
+0467:                         activeCompletionConnectionId = id;
+0468:                         try {
+0469:                           const ClientClass = getClientClass();
+0470:                           entry.client = new ClientClass(entry.transport);
+0471:                         } finally {
+0472:                           activeCompletionConnectionId = previousConnectionId;
+0473:                         }
+0474:                         registerBenignRefreshHandlers(entry);
+0475:                         watchTransportClose(entry);
+0476:                         await Promise.race([entry.client.initialized, abandoned]);
+0477:                         throwIfAbandoned(entry);
+0478:                         postStatus(id, 'open', null);
+0479:                         return true;
+0480:                       } catch (e) {
+0481:                         if (entry.disposed) {
+0482:                           releaseResources(entry);
+0483:                         } else {
+0484:                           disposeEntry(entry);
+0485:                         }
+0486:                         throw e;
+0487:                       }
+0488:                     },
+0489: 
+0490:                     disconnect(id) {
+0491:                       const entry = connections.get(id);
+0492:                       if (!entry) return false;
+0493:                       disposeEntry(entry);
+0494:                       postStatus(id, 'closed', null);
+0495:                       return true;
+==============================================================================
+ARQUIVO: packages/flutter_monaco/lib/src/lsp/lsp_connection.dart
+
+---
+0066: 
+0067:   /// The reconnect policy applied to unexpected transport drops.
+0068:   final LspReconnectPolicy reconnectPolicy;
+0069: 
+0070:   final Duration _initializationTimeout;
+0071:   final MonacoLspManager _manager;
+0072: 
+0073:   LspConnectionState _state = const LspConnectionState(
+0074:     status: LspConnectionStatus.connecting,
+0075:   );
+0076:   final StreamController<LspConnectionState> _stateController =
+0077:       StreamController<LspConnectionState>.broadcast();
+0078:   final StreamController<Map<String, Object?>> _completionDeliveryController =
+0079:       StreamController<Map<String, Object?>>.broadcast();
+0080:   final Completer<void> _closedCompleter = Completer<void>();
+0081: 
+0082:   // Owned and cancelled by MonacoLspManager (_finalize), which starts the
+0083:   // pump.
+0084:   // ignore: cancel_subscriptions
+0085:   StreamSubscription<Map<String, Object?>>? _pumpSubscription;
+0086: 
+0087:   /// The connect/reconnect attempt currently waiting on the handshake;
+0088:   /// null outside `_open`.
+0089:   _ConnectAttempt? _attempt;
+0090:   Future<void> _deliverChain = Future<void>.value();
+0091:   Timer? _reconnectTimer;
+0092:   int _reconnectAttempt = 0;
+0093:   bool _userDisconnected = false;
+0094:   bool _finalized = false;
+0095: 
+0096:   /// The bridged transport's onClose future, started by finalization; an
+0097:   /// explicit [disconnect] awaits it so "disconnected" includes the local
+0098:   /// process/socket shutdown. Null for non-bridged transports.
+0099:   Future<void>? _transportShutdown;
+0100: 
+0101:   /// The most recent connection state.
+0102:   LspConnectionState get state => _state;
+0103: 
+0104:   /// Broadcast stream of state transitions.
+0105:   ///
+0106:   /// The stream closes after the final `closed`/`failed` state is emitted.
+0107:   Stream<LspConnectionState> get stateChanges => _stateController.stream;
+0108: 
+0109:   /// Resultados devolvidos pelo provider de completion do Monaco.
+0110:   Stream<Map<String, Object?>> get completionDeliveries =>
+0111:       _completionDeliveryController.stream;
+0112: 
+0113:   /// Completes when the connection has permanently ended (explicit
+0114:   /// [disconnect], controller disposal, transport death without reconnect,
+0115:   /// exhausted reconnect attempts, or an editor page reload). Never
+0116:   /// completes with an error.
+0117:   Future<void> get whenClosed => _closedCompleter.future;
+0118: 
+0119:   /// Whether the connection currently serves language features.
+0120:   bool get isOpen => _state.isOpen;
+0121: 
+0122:   /// Disconnects the language server and unregisters every provider the
+0123:   /// in-page LSP client installed.
+0124:   ///
+0125:   /// Non-destructive to editor content and models. Safe to call multiple
+0126:   /// times. For bridged transports the returned future completes only after
+0127:   /// the transport's `onClose` callback finished (e.g. the local server
+0128:   /// process exited), so awaiting it means the local side is down too.
+0129:   Future<void> disconnect() => _manager._disconnect(this);
+0130: 
+0131:   /// **Experimental.** Sends a raw JSON-RPC request through the open
+0132:   /// connection and returns the server's result.
+0133:   ///
+0134:   /// Intended for non-standard server extensions (e.g.
+
+---
+0485:     }());
+0486:   }
+0487: 
+0488:   // ─── Protocol events (JS -> Dart) ─────────────────────────────────────────
+0489: 
+0490:   void _onProtocolEvent(ProtocolEvent event) {
+0491:     if (_disposed) return;
+0492:     switch (event.name) {
+0493:       case 'lspStatus':
+0494:         _handleLspStatus(Map<String, dynamic>.from(event.data));
+0495:       case 'lspMessage':
+0496:         _handleLspMessage(Map<String, dynamic>.from(event.data));
+0497:       case 'lspCompletionDelivery':
+0498:         _handleCompletionDelivery(Map<String, dynamic>.from(event.data));
+0499:     }
+0500:   }
+0501: 
+0502:   void _handleCompletionDelivery(Map<String, dynamic> data) {
+0503:     final connectionId = data['connectionId']?.toString();
+0504:     if (connectionId == null) return;
+0505: 
+0506:     final connection = _connections[connectionId];
+0507:     if (connection == null || connection._finalized) return;
+0508: 
+0509:     if (!connection._completionDeliveryController.isClosed) {
+0510:       connection._completionDeliveryController.add(
+0511:         Map<String, Object?>.from(data),
+0512:       );
+0513:     }
+0514:   }
+0515: 
+0516:   void _handleLspStatus(Map<String, dynamic> json) {
+0517:     final connection = _connections[json['connectionId']?.toString()];
+0518:     if (connection == null || connection._finalized) return;
+0519: 
+0520:     final status = json['status']?.toString();
+0521:     switch (status) {
+0522:       case 'open':
+0523:         // The connect flow drives the open transition itself (after the
+0524:         // invoke result); this event is informational.
+0525:         break;
+0526:       case 'closed':
+0527:       case 'failed':
+0528:         final rawError = json['error'];
+0529:         final errorInfo = rawError is Map
+0530:             ? Map<String, dynamic>.from(rawError)
+0531:             : null;
+0532:         final error = errorInfo == null
+0533:             ? null
+
+---
+0686:     connection._pumpSubscription?.cancel();
+0687:     if (identical(_connections[connection.id], connection)) {
+0688:       _connections.remove(connection.id);
+0689:     }
+0690:     connection._setState(
+0691:       LspConnectionState(
+0692:         status: status,
+0693:         error: error,
+0694:         reconnectAttempt: connection._reconnectAttempt,
+0695:       ),
+0696:     );
+0697:     connection._stateController.close();
+0698:     connection._completionDeliveryController.close();
+0699:     if (!connection._closedCompleter.isCompleted) {
+0700:       connection._closedCompleter.complete();
+0701:     }
+0702: 
+0703:     final transport = connection.transport;
+0704:     if (transport is LspBridgedTransport && transport.onClose != null) {
+0705:       // Started here without awaiting (this runs from synchronous dispose
+0706:       // paths); stored on the connection so an explicit disconnect() can
+0707:       // await the local shutdown.
+0708:       final shutdown = Future<void>.sync(() => transport.onClose!())
+0709:           .catchError((Object closeError) {
+0710:             debugPrint(
+0711:               '[MonacoLsp] onClose for "${connection.id}" threw: $closeError',
+0712:             );
+0713:           });
+0714:       connection._transportShutdown = shutdown;
+0715:       unawaited(shutdown);
+0716:     }
+0717:   }
+0718: 
+0719:   /// The page document reloaded: the in-page LSP clients and any page-owned
+0720:   /// sockets are gone with it, so no connection can keep serving features.
+0721:   ///
+==============================================================================
+ARQUIVO: lib/features/editor/presentation/screens/native_lsp_test_screen.dart
+
+---
+0395:         id: _connectionId,
+0396:         transport: transport,
+0397:         initializationTimeout: const Duration(seconds: 45),
+0398:       );
+0399: 
+0400:       if (_disposed) {
+0401:         await connection.disconnect();
+0402:         return;
+0403:       }
+0404: 
+0405:       _connection = connection;
+0406:       _completionDeliverySubscription =
+0407:           connection.completionDeliveries.listen(
+0408:         (delivery) {
+0409:           unawaited(
+0410:             NativeLspLogger.jsonDump(
+0411:               'monaco.completion.delivery',
+0412:               delivery,
+0413:             ),
+0414:           );
+0415: 
+0416:           if (_disposed || !mounted) return;
+0417: 
+0418:           final result = delivery['result'];
+0419:           final count = delivery['suggestionCount'];
+0420: 
+0421:           setState(() {
+0422:             _lastCompletion =
+0423:                 'Resultado efetivamente entregue ao Monaco:\n'
+0424:                 'URI: ${delivery['uri'] ?? '(desconhecida)'}\n'
+0425:                 'Posicao: ${delivery['position'] ?? '(desconhecida)'}\n'
+0426:                 'Quantidade: ${count ?? '(nao informada)'}\n'
+0427:                 'Resultado JSON:\n${_shortJson(result, maxLength: 12000)}';
+0428: 
+0429:             _status = delivery['error'] != null
+0430:                 ? 'O provider de completion apresentou erro.'

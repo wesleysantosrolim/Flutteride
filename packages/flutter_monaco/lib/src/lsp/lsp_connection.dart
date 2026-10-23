@@ -75,6 +75,8 @@ class LanguageServerConnection {
   );
   final StreamController<LspConnectionState> _stateController =
       StreamController<LspConnectionState>.broadcast();
+  final StreamController<Map<String, Object?>> _completionDeliveryController =
+      StreamController<Map<String, Object?>>.broadcast();
   final Completer<void> _closedCompleter = Completer<void>();
 
   // Owned and cancelled by MonacoLspManager (_finalize), which starts the
@@ -103,6 +105,10 @@ class LanguageServerConnection {
   ///
   /// The stream closes after the final `closed`/`failed` state is emitted.
   Stream<LspConnectionState> get stateChanges => _stateController.stream;
+
+  /// Resultados devolvidos pelo provider de completion do Monaco.
+  Stream<Map<String, Object?>> get completionDeliveries =>
+      _completionDeliveryController.stream;
 
   /// Completes when the connection has permanently ended (explicit
   /// [disconnect], controller disposal, transport death without reconnect,
@@ -488,6 +494,22 @@ class MonacoLspManager {
         _handleLspStatus(Map<String, dynamic>.from(event.data));
       case 'lspMessage':
         _handleLspMessage(Map<String, dynamic>.from(event.data));
+      case 'lspCompletionDelivery':
+        _handleCompletionDelivery(Map<String, dynamic>.from(event.data));
+    }
+  }
+
+  void _handleCompletionDelivery(Map<String, dynamic> data) {
+    final connectionId = data['connectionId']?.toString();
+    if (connectionId == null) return;
+
+    final connection = _connections[connectionId];
+    if (connection == null || connection._finalized) return;
+
+    if (!connection._completionDeliveryController.isClosed) {
+      connection._completionDeliveryController.add(
+        Map<String, Object?>.from(data),
+      );
     }
   }
 
@@ -673,6 +695,7 @@ class MonacoLspManager {
       ),
     );
     connection._stateController.close();
+    connection._completionDeliveryController.close();
     if (!connection._closedCompleter.isCompleted) {
       connection._closedCompleter.complete();
     }

@@ -105,6 +105,113 @@ window.__FMB.lsp = function (ctx) {
                   // _capabilitiesRegistry, _connection) - all verified against
                   // the 0.57.0 sources. Kept in this one block so future
                   // Monaco upgrades have a single place to re-verify.
+                  // Captura de diagnostico do resultado de completion.
+                  let activeCompletionConnectionId = null;
+                  let completionProviderCaptureInstalled = false;
+
+                  function installCompletionProviderCapture() {
+                    if (completionProviderCaptureInstalled) return;
+                    if (!window.monaco ||
+                        !monaco.languages ||
+                        typeof monaco.languages.registerCompletionItemProvider !== 'function') {
+                      return;
+                    }
+
+                    const originalRegister =
+                      monaco.languages.registerCompletionItemProvider;
+
+                    monaco.languages.registerCompletionItemProvider = function (
+                      language,
+                      provider
+                    ) {
+                      const connectionId = activeCompletionConnectionId;
+
+                      if (!connectionId ||
+                          !provider ||
+                          typeof provider.provideCompletionItems !== 'function') {
+                        return originalRegister.apply(this, arguments);
+                      }
+
+                      const originalProvide = provider.provideCompletionItems;
+                      const wrappedProvider = Object.assign({}, provider);
+
+                      wrappedProvider.provideCompletionItems = function (
+                        model,
+                        position,
+                        context,
+                        token
+                      ) {
+                        function report(value) {
+                          try {
+                            const fullResponse =
+                              JSON.parse(JSON.stringify(value));
+
+                            postMessageToFlutter({
+                              event: 'lspCompletionDelivery',
+                              connectionId: connectionId,
+                              uri: model && model.uri
+                                ? model.uri.toString()
+                                : null,
+                              position: position || null,
+                              result: fullResponse,
+                            });
+                          } catch (error) {
+                            // O diagnostico nao deve interromper o Monaco.
+                          }
+
+                          return value;
+                        }
+
+                        let result;
+                        try {
+                          result = originalProvide.call(
+                            provider,
+                            model,
+                            position,
+                            context,
+                            token
+                          );
+                        } catch (error) {
+                          postMessageToFlutter({
+                            event: 'lspCompletionDelivery',
+                            connectionId: connectionId,
+                            uri: model && model.uri
+                              ? model.uri.toString()
+                              : null,
+                            position: position || null,
+                            error: String(error),
+                          });
+                          throw error;
+                        }
+
+                        if (result && typeof result.then === 'function') {
+                          return result.then(report, (error) => {
+                            postMessageToFlutter({
+                              event: 'lspCompletionDelivery',
+                              connectionId: connectionId,
+                              uri: model && model.uri
+                                ? model.uri.toString()
+                                : null,
+                              position: position || null,
+                              error: String(error),
+                            });
+                            throw error;
+                          });
+                        }
+
+                        return report(result);
+                      };
+
+                      return originalRegister.call(
+                        this,
+                        language,
+                        wrappedProvider
+                      );
+                    };
+
+                    completionProviderCaptureInstalled = true;
+                  }
+
                   let FlutterLspClientClass = null;
                   function getClientClass() {
                     if (FlutterLspClientClass) return FlutterLspClientClass;
@@ -348,8 +455,15 @@ window.__FMB.lsp = function (ctx) {
                             '" does not implement IMessageTransport ' +
                             '(state/send/setListener).');
                         }
-                        const ClientClass = getClientClass();
-                        entry.client = new ClientClass(entry.transport);
+                        installCompletionProviderCapture();
+                        const previousConnectionId = activeCompletionConnectionId;
+                        activeCompletionConnectionId = id;
+                        try {
+                          const ClientClass = getClientClass();
+                          entry.client = new ClientClass(entry.transport);
+                        } finally {
+                          activeCompletionConnectionId = previousConnectionId;
+                        }
                         registerBenignRefreshHandlers(entry);
                         watchTransportClose(entry);
                         await Promise.race([entry.client.initialized, abandoned]);
@@ -386,9 +500,32 @@ window.__FMB.lsp = function (ctx) {
                     // (server -> client direction).
                     deliverServerMessage(id, message) {
                       const entry = connections.get(id);
-                      if (!entry || !entry.bridged) return false;
-                      entry.bridged.deliver(message);
-                      return true;
+                      const result = message && message.result;
+                      const items = result && Array.isArray(result.items)
+                        ? result.items : [];
+                      const delivered = !!(
+                        entry && entry.bridged &&
+                        entry.bridged.deliver(message)
+                      );
+
+                      if (message && (
+                        message.id !== undefined ||
+                        message.method === 'textDocument/publishDiagnostics'
+                      )) {
+                        try {
+                          postMessageToFlutter({
+                            event: 'lspCompletionTrace',
+                            connectionId: id,
+                            messageId: message.id === undefined
+                              ? null : message.id,
+                            method: message.method || null,
+                            itemCount: items.length,
+                            delivered: delivered,
+                          });
+                        } catch (_) {}
+                      }
+
+                      return delivered;
                     },
 
                     listConnections() {
