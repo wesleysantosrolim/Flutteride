@@ -77,7 +77,7 @@ class MonacoAssets {
   ///
   /// When this version changes, [ensureReady] will re-extract assets on
   /// native platforms to ensure the correct version is used.
-  static const String monacoVersion = '0.57.1-debug';
+  static const String monacoVersion = '0.57.1-debug-native-trace-20261024-v3';
 
   static Completer<void>? _initCompleter;
 
